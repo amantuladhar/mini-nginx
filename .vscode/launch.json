@@ -1,0 +1,14 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+      {
+        "name": "Run Current Jai File",
+        "type": "lldb",
+        "request": "launch",
+        "program": "./out/mini-nginx",
+        "args": [""],
+        "preLaunchTask": "Jai Build",
+        "console": "integratedTerminal"
+      }
+    ]
+  }

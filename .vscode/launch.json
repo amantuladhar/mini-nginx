@@ -1,14 +1,15 @@
 {
-    "version": "0.2.0",
-    "configurations": [
-      {
-        "name": "Run Current Jai File",
-        "type": "lldb",
-        "request": "launch",
-        "program": "./out/mini-nginx",
-        "args": [""],
-        "preLaunchTask": "Jai Build",
-        "console": "integratedTerminal"
-      }
-    ]
-  }
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Debug Jai Program",
+      "type": "lldb",
+      "request": "launch",
+      "cwd": "${workspaceFolder}",
+      "program": "./out/mini-nginx",
+      "args": [""],
+      "preLaunchTask": "Jai Build",
+      "console": "integratedTerminal"
+    }
+  ]
+}

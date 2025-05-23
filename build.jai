@@ -5,6 +5,7 @@ build:: () {
     w := compiler_create_workspace("mini-nginx");
     options := get_build_options(w);
     set_working_directory(#filepath);
+    make_directory_if_it_does_not_exist("out");
 
     options.output_path =  "out" ;
     options.output_executable_name = "mini-nginx";
@@ -20,3 +21,4 @@ build:: () {
 #import "Compiler";
 #import "Basic";
 #import "String";
+#import "File";

@@ -123,6 +123,7 @@ setup_listener :: (port: int) -> s32 {
     }
     log("Listening on port %", PORT);
 
+    set_nonblocking(listener_socket_fd);
 
     return listener_socket_fd;
 }
@@ -144,10 +145,7 @@ worker_main_loop :: (listener_socket_fd: s32) {
     log("Event loop initialized: %", ev_loop);
     defer queue_deinit(*ev_loop);
 
-    // @todo - after multiple child processes are created, I need to
-    // still figure out if I can can do this on parent process
-    // or if I need to do this on each child process
-    set_nonblocking(listener_socket_fd);
+
 
     data := New(Client_Conn_Acceptor_EData);
     data.* = .{ listener_socket_fd };

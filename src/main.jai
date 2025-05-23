@@ -6,35 +6,89 @@ Process_Type :: enum {
     CHILD;
 }
 
+// @note
+// Global variables are bad (maybe), but I am not doing multithreading in this example
+// I am using fork() to create multiple child process, and each child will close this memory
+// so maybe for this situation this is not a problem
+child_pids: [..]s32;
+running   := true;
+fork      := true;
+
+master_shutdown_handler:: (sig: s32, info: *POSIX.siginfo_t, ctx: *void) #c_call {
+    push_context {
+        log("[%]: Signal handler called: % - Setting running=false\n", POSIX.getpid(), sig);
+        running = false;
+        log("[%]: running is now %\n", POSIX.getpid(), running);
+    }
+}
+
+setup_graceful_shutdown_handler :: () {
+    sa: POSIX.sigaction_t;
+    sa.sa_sigaction = master_shutdown_handler;
+    POSIX.sigemptyset(*sa.sa_mask);
+    sa.sa_flags = POSIX.SA_SIGINFO;
+
+    POSIX.sigaction(POSIX.SIGTERM, *sa, null);
+    POSIX.sigaction(POSIX.SIGKILL, *sa, null);
+    POSIX.sigaction(POSIX.SIGINT, *sa, null);
+}
+
+
 main :: () {
     defer { report_memory_leaks(); };
+
     logger_data := Custom_Logger_Data.{ .PARENT, POSIX.getpid() };
     context.logger = custom_logger;
     context.logger_data = *logger_data;
 
     master_main_loop();
+    log("Master process has shutdown");
 }
 
 master_main_loop :: () {
+    setup_graceful_shutdown_handler();
     listener_socket_fd := setup_listener(PORT);
     defer POSIX.close(listener_socket_fd);
 
     // @investigate
     // What happens to memory allocated in the child process?
     // does memory debugger catch them?
-    pid := POSIX.fork();
-    if pid == {
-        case 0;
-            logger_data := Custom_Logger_Data.{ .CHILD, POSIX.getpid() };
-            context.logger_data = *logger_data;
-            worker_main_loop(listener_socket_fd);
-            exit(0);
-        case -1;
-            log_error("fork failed: %", System.get_error_string(POSIX.errno()));
-            exit(1);
-        case;
-            log("I have a baibeeee.... I am gonna call you - %", pid);
-            POSIX.waitpid(pid, null, 0);
+    if !fork worker_main_loop(listener_socket_fd);
+    else {
+        pid := POSIX.fork();
+        if pid == {
+            case 0;
+                logger_data := Custom_Logger_Data.{ .CHILD, POSIX.getpid() };
+                context.logger_data = *logger_data;
+                worker_main_loop(listener_socket_fd);
+                log("Child process has stopped.");
+                exit(0);
+            case -1;
+                log_error("fork failed: %", System.get_error_string(POSIX.errno()));
+                exit(1);
+            case;
+                log("I now have a child process and its pid is %", pid);
+                array_add(*child_pids, pid);
+                log("Waiting for child process to complete....");
+                while true && child_pids.count > 0 {
+                    result := POSIX.waitpid(-1, null, POSIX.WNOHANG);
+                    if result == {
+                        case 0; // none have shutdown
+                            POSIX.usleep(1 * 1000_000);
+                        case -1;
+                            error := POSIX.errno();
+                            // @note
+                            // My understanding here is because of signal interrupt handler
+                            // control flow goes to the sig handler, this retuns right away with EINTR error code
+                            if error == POSIX.EINTR continue;
+                            log_error("waitpid failed: %", System.get_error_string(error));
+                        case;
+                            log("pid = % - shutdown successfully.", result);
+                            array_unordered_remove_by_value(*child_pids, result);
+                    }
+                }
+                log("Waiting complete. All child process is now dead.");
+        }
     }
 }
 
@@ -103,13 +157,17 @@ worker_main_loop :: (listener_socket_fd: s32) {
     queue_register(*ev_loop, listener_socket_fd, .READ, conn_accept_edata);
 
     events: [10]Event;
-    while true {
+    while running {
         defer {
             // Adding 1 second delay for debugging - remove later
             POSIX.usleep(1000_000);
         }
         log("Polling for events... event_loop: %", ev_loop);
         n_events := queue_poll(ev_loop, *events);
+        if n_events == -1 {
+            log_error("poll failed: %", System.get_error_string(POSIX.errno()));
+            continue;
+        }
         log("Number of events: %", n_events);
         for event: array_view(events, 0, n_events) {
             event_data: *Event_Data = parse_event_data(*event);

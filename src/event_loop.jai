@@ -41,7 +41,7 @@ queue_deinit :: (ev: *Event_Loop) {
         case;
             #assert(false, "Unsupported OS");
     }
-    free(*ev.registered_fds);
+    free(ev.registered_fds.data);
 }
 
 queue_register :: (ev: *Event_Loop, which_fd: s32, interest: Event_Interest, event_data: *Event_Data) {

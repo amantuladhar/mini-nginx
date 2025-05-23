@@ -12,7 +12,55 @@ Process_Type :: enum {
 // so maybe for this situation this is not a problem
 child_pids: [..]s32;
 running   := true;
-fork      := true;
+fork      := 4;
+
+main :: () {
+    defer { report_memory_leaks(); };
+
+    logger_data := Custom_Logger_Data.{ .PARENT, POSIX.getpid() };
+    context.logger = custom_logger;
+    context.logger_data = *logger_data;
+
+    master_main_loop();
+    log("Master process has shutdown");
+}
+
+master_main_loop :: () {
+    setup_graceful_shutdown_handler();
+    listener_socket_fd := setup_listener(PORT);
+    defer POSIX.close(listener_socket_fd);
+
+    if !fork worker_main_loop(listener_socket_fd);
+    else {
+        // @investigate
+        // What happens to memory allocated in the child process?
+        // does memory debugger catch them?
+        master_fork_process(listener_socket_fd);
+        master_wait_for_fork_process();
+    }
+}
+
+master_fork_process :: (listener_socket_fd: s32) {
+    logger_data := cast(*Custom_Logger_Data, context.logger_data);
+    assert(logger_data.*.process_type == .PARENT, "This method should only be called from parent process");
+    for 0..fork-1 {
+        pid := POSIX.fork();
+        if pid == {
+            case 0;
+                logger_data := Custom_Logger_Data.{ .CHILD, POSIX.getpid() };
+                context.logger_data = *logger_data;
+                worker_main_loop(listener_socket_fd);
+                log("Child process has stopped.");
+                exit(0);
+            case -1;
+                log_error("fork failed: %", System.get_error_string(POSIX.errno()));
+                exit(1);
+            case;
+                log("I now have a child process and its pid is %", pid);
+                array_add(*child_pids, pid);
+            }
+    }
+}
 
 master_shutdown_handler:: (sig: s32, info: *POSIX.siginfo_t, ctx: *void) #c_call {
     push_context {
@@ -33,63 +81,28 @@ setup_graceful_shutdown_handler :: () {
     POSIX.sigaction(POSIX.SIGINT, *sa, null);
 }
 
-
-main :: () {
-    defer { report_memory_leaks(); };
-
-    logger_data := Custom_Logger_Data.{ .PARENT, POSIX.getpid() };
-    context.logger = custom_logger;
-    context.logger_data = *logger_data;
-
-    master_main_loop();
-    log("Master process has shutdown");
-}
-
-master_main_loop :: () {
-    setup_graceful_shutdown_handler();
-    listener_socket_fd := setup_listener(PORT);
-    defer POSIX.close(listener_socket_fd);
-
-    // @investigate
-    // What happens to memory allocated in the child process?
-    // does memory debugger catch them?
-    if !fork worker_main_loop(listener_socket_fd);
-    else {
-        pid := POSIX.fork();
-        if pid == {
-            case 0;
-                logger_data := Custom_Logger_Data.{ .CHILD, POSIX.getpid() };
-                context.logger_data = *logger_data;
-                worker_main_loop(listener_socket_fd);
-                log("Child process has stopped.");
-                exit(0);
+master_wait_for_fork_process :: () {
+    logger_data := cast(*Custom_Logger_Data, context.logger_data);
+    assert(logger_data.*.process_type == .PARENT, "This method should only be called from parent process");
+    log("Waiting for child process to complete....");
+    while child_pids.count > 0 {
+        result := POSIX.waitpid(-1, null, POSIX.WNOHANG);
+        if result == {
+            case 0; // none have shutdown
+                POSIX.usleep(1 * 1000_000);
             case -1;
-                log_error("fork failed: %", System.get_error_string(POSIX.errno()));
-                exit(1);
+                error := POSIX.errno();
+                // @note
+                // My understanding here is because of signal interrupt handler
+                // control flow goes to the sig handler, this retuns right away with EINTR error code
+                if error == POSIX.EINTR continue;
+                log_error("waitpid failed: %", System.get_error_string(error));
             case;
-                log("I now have a child process and its pid is %", pid);
-                array_add(*child_pids, pid);
-                log("Waiting for child process to complete....");
-                while true && child_pids.count > 0 {
-                    result := POSIX.waitpid(-1, null, POSIX.WNOHANG);
-                    if result == {
-                        case 0; // none have shutdown
-                            POSIX.usleep(1 * 1000_000);
-                        case -1;
-                            error := POSIX.errno();
-                            // @note
-                            // My understanding here is because of signal interrupt handler
-                            // control flow goes to the sig handler, this retuns right away with EINTR error code
-                            if error == POSIX.EINTR continue;
-                            log_error("waitpid failed: %", System.get_error_string(error));
-                        case;
-                            log("pid = % - shutdown successfully.", result);
-                            array_unordered_remove_by_value(*child_pids, result);
-                    }
-                }
-                log("Waiting complete. All child process is now dead.");
+                log("pid = % - shutdown successfully.", result);
+                array_unordered_remove_by_value(*child_pids, result);
         }
     }
+    log("Waiting complete. All child process is now dead.");
 }
 
 setup_listener :: (port: int) -> s32 {

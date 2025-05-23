@@ -62,7 +62,7 @@ master_fork_process :: (listener_socket_fd: s32) {
     }
 }
 
-master_shutdown_handler:: (sig: s32, info: *POSIX.siginfo_t, ctx: *void) #c_call {
+shutdown_handler:: (sig: s32, info: *POSIX.siginfo_t, ctx: *void) #c_call {
     push_context {
         log("[%]: Signal handler called: % - Setting running=false\n", POSIX.getpid(), sig);
         running = false;
@@ -72,7 +72,7 @@ master_shutdown_handler:: (sig: s32, info: *POSIX.siginfo_t, ctx: *void) #c_call
 
 setup_graceful_shutdown_handler :: () {
     sa: POSIX.sigaction_t;
-    sa.sa_sigaction = master_shutdown_handler;
+    sa.sa_sigaction = shutdown_handler;
     POSIX.sigemptyset(*sa.sa_mask);
     sa.sa_flags = POSIX.SA_SIGINFO;
 
@@ -91,6 +91,9 @@ master_wait_for_fork_process :: () {
             case 0; // none have shutdown
                 POSIX.usleep(1 * 1000_000);
             case -1;
+                // @todo
+                // We need to check if the child process was shutdown by signal
+                // Maybe we need to check status code and if it is not 0 we need to respawn
                 error := POSIX.errno();
                 // @note
                 // My understanding here is because of signal interrupt handler

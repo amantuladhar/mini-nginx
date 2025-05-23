@@ -43,13 +43,13 @@ master_main_loop :: () {
 master_fork_process :: (listener_socket_fd: s32) {
     logger_data := cast(*Custom_Logger_Data, context.logger_data);
     assert(logger_data.*.process_type == .PARENT, "This method should only be called from parent process");
-    for 0..fork-1 {
+    for fork_counter: 0..fork-1 {
         pid := POSIX.fork();
         if pid == {
             case 0;
                 logger_data := Custom_Logger_Data.{ .CHILD, POSIX.getpid() };
                 context.logger_data = *logger_data;
-                worker_main_loop(listener_socket_fd);
+                worker_main_loop(listener_socket_fd, fork_counter);
                 log("Child process has stopped.");
                 exit(0);
             case -1;
@@ -156,12 +156,13 @@ set_nonblocking :: (socket_fd: s32) {
     }
 }
 
-worker_main_loop :: (listener_socket_fd: s32) {
+worker_main_loop :: (listener_socket_fd: s32, fork_counter: int) {
     ev_loop := queue_init();
     log("Event loop initialized: %", ev_loop);
     defer queue_deinit(*ev_loop);
 
-
+    // @todo
+    // CPU Affinity - on linux might be easier but on mac it is bit tricky
 
     data := New(Client_Conn_Acceptor_EData);
     data.* = .{ listener_socket_fd };

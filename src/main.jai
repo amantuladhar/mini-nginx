@@ -162,7 +162,10 @@ worker_main_loop :: (listener_socket_fd: s32, fork_counter: int) {
     defer queue_deinit(*ev_loop);
 
     // @todo
-    // CPU Affinity - on linux might be easier but on mac it is bit tricky
+    // CPU Affinity - on linux might be easier
+    // but on mac it is bit tricky
+    // MAC has something called QoS which we can use to set priority
+    // AFAIK we can't assign specific CPU for a given process on mac
 
     data := New(Client_Conn_Acceptor_EData);
     data.* = .{ listener_socket_fd };

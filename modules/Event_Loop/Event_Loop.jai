@@ -1,9 +1,9 @@
 Event_Loop :: struct {
-    event_fd: s32;
+    evl_queue_fd: s32;
     registered_fds: [..]s32;
 }
 
-Event_Interest :: enum s16 {
+Event_Topic :: enum s16 {
     #if OS == {
         case .LINUX;
             READ :: Linux.EPOLLIN | Linux.EPOLLET;
@@ -12,11 +12,6 @@ Event_Interest :: enum s16 {
         case;
             #assert(false, "Unsupported OS");
     }
-}
-
-Event_Data :: struct {
-    ctx: *void;
-    callback: (event_loop: *Event_Loop, event_data: *Event_Data);
 }
 
 #if OS == {
@@ -28,23 +23,28 @@ Event_Data :: struct {
         #assert(false, "Unsupported OS");
 }
 
-queue_init :: () -> Event_Loop {
-    return .{ event_fd = _create_queue() };
+Event_Data :: struct {
+    ctx: *void;
+    callback: (event_loop: *Event_Loop, event_data: *Event_Data);
 }
 
-queue_deinit :: (ev: *Event_Loop) {
+evl_init :: () -> Event_Loop {
+    return .{ evl_queue_fd = evl_init_queue() };
+}
+
+evl_deinit :: (ev: *Event_Loop) {
     #if OS == {
         case .LINUX;
-            POSIX.close(ev.event_fd);
+            POSIX.close(ev.evl_queue_fd);
         case .MACOS;
-            POSIX.close(ev.event_fd);
+            POSIX.close(ev.evl_queue_fd);
         case;
             #assert(false, "Unsupported OS");
     }
     free(ev.registered_fds.data);
 }
 
-queue_register :: (ev: *Event_Loop, which_fd: s32, interest: Event_Interest, event_data: *Event_Data) {
+evl_register :: (ev: *Event_Loop, which_fd: s32, topic: Event_Topic, event_data: *Event_Data) {
     #if OS == {
         case .LINUX;
             #assert(false, "Not implemented yet");
@@ -52,7 +52,7 @@ queue_register :: (ev: *Event_Loop, which_fd: s32, interest: Event_Interest, eve
             changelist: [1]Event = .[
                 .{
                     ident = xx which_fd,
-                    filter = xx interest,
+                    filter = xx topic,
                     flags = MacOS.Kevent_Flags.ADD | MacOS.Kevent_Flags.ENABLE,
                     fflags = 0,
                     data = 0,
@@ -60,13 +60,13 @@ queue_register :: (ev: *Event_Loop, which_fd: s32, interest: Event_Interest, eve
                 }
             ];
             events: [0]Event;
-            MacOS.kevent64(ev.event_fd, changelist.data, 1, events.data, 0, .KEVENT_FLAG_NONE, null);
+            MacOS.kevent64(ev.evl_queue_fd, changelist.data, 1, events.data, 0, .KEVENT_FLAG_NONE, null);
         case;
             #assert(false, "Unsupported OS");
     }
 }
 
-queue_unregister :: (ev: *Event_Loop, which_fd: s32, interest: Event_Interest) {
+evl_unregister :: (ev: *Event_Loop, which_fd: s32, topic: Event_Topic) {
     #if OS == {
         case .LINUX;
             #assert(false, "Not implemented yet");
@@ -74,7 +74,7 @@ queue_unregister :: (ev: *Event_Loop, which_fd: s32, interest: Event_Interest) {
             changelist: [1]Event = .[
                 .{
                     ident = xx which_fd,
-                    filter = xx interest,
+                    filter = xx topic,
                     flags = MacOS.Kevent_Flags.DELETE | MacOS.Kevent_Flags.DISABLE,
                     fflags = 0,
                     data = 0,
@@ -82,13 +82,13 @@ queue_unregister :: (ev: *Event_Loop, which_fd: s32, interest: Event_Interest) {
                 }
             ];
             events: [0]Event;
-            MacOS.kevent64(ev.event_fd, changelist.data,1, events.data,0, .KEVENT_FLAG_NONE,null);
+            MacOS.kevent64(ev.evl_queue_fd, changelist.data,1, events.data,0, .KEVENT_FLAG_NONE,null);
         case;
             #assert(false, "Unsupported OS");
     }
 }
 
-parse_event_data :: (event: Event) -> *Event_Data {
+evl_get_event_data :: (event: Event) -> *Event_Data {
     #if OS == {
         case .MACOS;
             event_data := cast(*Event_Data, event.udata);
@@ -100,10 +100,10 @@ parse_event_data :: (event: Event) -> *Event_Data {
     }
 }
 
-queue_poll :: (ev: Event_Loop, events: *[10]Event) -> int {
+evl_poll :: (ev: Event_Loop, events: *[10]Event) -> int {
     #if OS == {
         case .MACOS;
-            n_events := MacOS.kevent64(ev.event_fd, null, 0, events.data, events.count, .KEVENT_FLAG_NONE, null);
+            n_events := MacOS.kevent64(ev.evl_queue_fd, null, 0, events.data, events.count, .KEVENT_FLAG_NONE, null);
             return n_events;
         case .LINUX;
             #assert(false, "Not implemented yet");
@@ -112,20 +112,9 @@ queue_poll :: (ev: Event_Loop, events: *[10]Event) -> int {
     }
 }
 
+#scope_module
 
-
-Posix :: #import "POSIX";
-#if OS == {
-    case .MACOS;
-        MacOS :: #import "MacOS";
-    case .LINUX;
-        Linux :: #import "Linux";
-    case;
-}
-
-#scope_file
-
-_create_queue :: () -> s32 {
+evl_init_queue :: () -> s32 {
     #if OS == {
         case .MACOS;
             return MacOS.kqueue();
@@ -134,4 +123,14 @@ _create_queue :: () -> s32 {
         case;
             #assert(false, "Unsupported OS");
     }
+}
+
+#import "Basic";
+POSIX :: #import "POSIX";
+#if OS == {
+    case .MACOS;
+        MacOS :: #import "MacOS";
+    case .LINUX;
+        Linux :: #import "Linux";
+    case;
 }

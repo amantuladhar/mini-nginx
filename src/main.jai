@@ -15,7 +15,7 @@ running   := true;
 fork      := 4;
 
 main :: () {
-    defer { report_memory_leaks(); };
+    defer { report_memory_leaks(); }
 
     logger_data := Custom_Logger_Data.{ .PARENT, POSIX.getpid() };
     context.logger = custom_logger;
@@ -30,7 +30,7 @@ master_main_loop :: () {
     listener_socket_fd := setup_listener(PORT);
     defer POSIX.close(listener_socket_fd);
 
-    if !fork worker_main_loop(listener_socket_fd);
+    if !fork worker_main_loop(listener_socket_fd, 0);
     else {
         // @investigate
         // What happens to memory allocated in the child process?
@@ -139,7 +139,7 @@ setup_listener :: (port: int) -> s32 {
     }
     log("Listening on port %", PORT);
 
-    set_nonblocking(listener_socket_fd);
+    // set_nonblocking(listener_socket_fd);
 
     return listener_socket_fd;
 }
@@ -157,9 +157,11 @@ set_nonblocking :: (socket_fd: s32) {
 }
 
 worker_main_loop :: (listener_socket_fd: s32, fork_counter: int) {
-    ev_loop := queue_init();
+    set_nonblocking(listener_socket_fd);
+
+    ev_loop := Event_Loop.evl_init();
     log("Event loop initialized: %", ev_loop);
-    defer queue_deinit(*ev_loop);
+    defer Event_Loop.evl_deinit(*ev_loop);
 
     // @todo
     // CPU Affinity - on linux might be easier
@@ -170,25 +172,25 @@ worker_main_loop :: (listener_socket_fd: s32, fork_counter: int) {
     data := New(Client_Conn_Acceptor_EData);
     data.* = .{ listener_socket_fd };
 
-    conn_accept_edata := New(Event_Data);
+    conn_accept_edata := New(Event_Loop.Event_Data);
     conn_accept_edata.* = .{ data, connection_acceptor };
-    queue_register(*ev_loop, listener_socket_fd, .READ, conn_accept_edata);
+    Event_Loop.evl_register(*ev_loop, listener_socket_fd, .READ, conn_accept_edata);
 
-    events: [10]Event;
+    events: [10]Event_Loop.Event;
     while running {
         defer {
             // Adding 1 second delay for debugging - remove later
             POSIX.usleep(1000_000);
         }
         log("Polling for events... event_loop: %", ev_loop);
-        n_events := queue_poll(ev_loop, *events);
+        n_events := Event_Loop.evl_poll(ev_loop, *events);
         if n_events == -1 {
             log_error("poll failed: %", System.get_error_string(POSIX.errno()));
             continue;
         }
         log("Number of events: %", n_events);
         for event: array_view(events, 0, n_events) {
-            event_data: *Event_Data = parse_event_data(*event);
+            event_data := Event_Loop.evl_get_event_data(*event);
             event_data.callback(*ev_loop, event_data);
         }
     }
@@ -199,7 +201,7 @@ Client_Conn_Acceptor_EData :: struct {
     socket_fd: s32;
 }
 
-connection_acceptor :: (ev_loop: *Event_Loop, event_data: *Event_Data) {
+connection_acceptor :: (ev_loop: *Event_Loop.Event_Loop, event_data: *Event_Loop.Event_Data) {
     ctx := cast(*Client_Conn_Acceptor_EData, event_data.ctx);
     listener_socket_fd := ctx.*.socket_fd;
     log("Connection acceptor called. fd = %, event_loop: %", listener_socket_fd, ev_loop.*);
@@ -217,9 +219,9 @@ connection_acceptor :: (ev_loop: *Event_Loop, event_data: *Event_Data) {
 
     data := New(Client_Request_Reader_EData);
     data.* = .{ client_socket_fd };
-    client_req_reader_edata := New(Event_Data);
+    client_req_reader_edata := New(Event_Loop.Event_Data);
     client_req_reader_edata.* = .{ data, client_request_read };
-    queue_register(ev_loop, client_socket_fd, .READ, client_req_reader_edata);
+    Event_Loop.evl_register(ev_loop, client_socket_fd, .READ, client_req_reader_edata);
     log("Accepted connection from %:%", to_string(Socket.inet_ntoa(client_addr.sin_addr)), Socket.ntohs(client_addr.sin_port));
 }
 Client_Request_Reader_EData :: struct {
@@ -227,14 +229,14 @@ Client_Request_Reader_EData :: struct {
     socket_fd: s32;
 }
 
-client_request_read :: (ev_loop: *Event_Loop, event_data: *Event_Data)  {
+client_request_read :: (ev_loop: *Event_Loop.Event_Loop, event_data: *Event_Loop.Event_Data)  {
     ctx := cast(*Client_Request_Reader_EData, event_data.ctx);
     client_socket_fd := ctx.*.socket_fd;
     log("Client request reader called: fd = %, event_loop: %", client_socket_fd, ev_loop.*);
 
     defer {
         log("Cleaning up resources for fd = %", client_socket_fd);
-        queue_unregister(ev_loop, client_socket_fd, .READ);
+        Event_Loop.evl_unregister(ev_loop, client_socket_fd, .READ);
         array_unordered_remove_by_value(*ev_loop.registered_fds, client_socket_fd);
         POSIX.close(client_socket_fd);
     }
@@ -262,5 +264,5 @@ client_request_read :: (ev_loop: *Event_Loop, event_data: *Event_Data)  {
 Socket :: #import "Socket";
 System :: #import "System";
 POSIX :: #import "POSIX";
+Event_Loop :: #import "Event_Loop";
 #load "custom_logger.jai";
-#load "event_loop.jai";

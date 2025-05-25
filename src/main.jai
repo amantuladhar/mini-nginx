@@ -15,7 +15,7 @@ running   := true;
 fork      := 4;
 
 main :: () {
-    defer { report_memory_leaks(); }
+    defer { reset_temporary_storage(); report_memory_leaks(); }
 
     logger_data := Custom_Logger_Data.{ .PARENT, POSIX.getpid() };
     context.logger = custom_logger;
@@ -26,7 +26,7 @@ main :: () {
 }
 
 master_main_loop :: () {
-    setup_graceful_shutdown_handler();
+    set_shutdown_handler(shutdown_handler);
     listener_socket_fd := setup_listener(PORT);
     defer POSIX.close(listener_socket_fd);
 
@@ -64,21 +64,9 @@ master_fork_process :: (listener_socket_fd: s32) {
 
 shutdown_handler:: (sig: s32, info: *POSIX.siginfo_t, ctx: *void) #c_call {
     push_context {
-        log("[%]: Signal handler called: % - Setting running=false\n", POSIX.getpid(), sig);
+        log("[%]: Signal handler called", POSIX.getpid());
         running = false;
-        log("[%]: running is now %\n", POSIX.getpid(), running);
     }
-}
-
-setup_graceful_shutdown_handler :: () {
-    sa: POSIX.sigaction_t;
-    sa.sa_sigaction = shutdown_handler;
-    POSIX.sigemptyset(*sa.sa_mask);
-    sa.sa_flags = POSIX.SA_SIGINFO;
-
-    POSIX.sigaction(POSIX.SIGTERM, *sa, null);
-    POSIX.sigaction(POSIX.SIGKILL, *sa, null);
-    POSIX.sigaction(POSIX.SIGINT, *sa, null);
 }
 
 master_wait_for_fork_process :: () {
@@ -265,4 +253,5 @@ Socket :: #import "Socket";
 System :: #import "System";
 POSIX :: #import "POSIX";
 Event_Loop :: #import "Event_Loop";
+#import "Graceful_Shutdown";
 #load "custom_logger.jai";

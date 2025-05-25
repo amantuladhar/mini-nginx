@@ -12,7 +12,7 @@ Process_Type :: enum {
 // so maybe for this situation this is not a problem
 child_pids: [..]s32;
 running   := true;
-fork      := 4;
+fork      := 0;
 
 main :: () {
     defer { reset_temporary_storage(); report_memory_leaks(); }
@@ -159,9 +159,10 @@ worker_main_loop :: (listener_socket_fd: s32, fork_counter: int) {
 
     data := New(Client_Conn_Acceptor_EData);
     data.* = .{ listener_socket_fd };
-
     conn_accept_edata := New(Event_Loop.Event_Data);
     conn_accept_edata.* = .{ data, connection_acceptor };
+    defer Event_Loop.evl_deinit_event_data(conn_accept_edata);
+
     Event_Loop.evl_register(*ev_loop, listener_socket_fd, .READ, conn_accept_edata);
 
     events: [10]Event_Loop.Event;
@@ -205,10 +206,13 @@ connection_acceptor :: (ev_loop: *Event_Loop.Event_Loop, event_data: *Event_Loop
 
     array_add(*ev_loop.registered_fds, client_socket_fd);
 
+    // @note
+    // This gets freed on client_request_read procedure
     data := New(Client_Request_Reader_EData);
     data.* = .{ client_socket_fd };
     client_req_reader_edata := New(Event_Loop.Event_Data);
     client_req_reader_edata.* = .{ data, client_request_read };
+
     Event_Loop.evl_register(ev_loop, client_socket_fd, .READ, client_req_reader_edata);
     log("Accepted connection from %:%", to_string(Socket.inet_ntoa(client_addr.sin_addr)), Socket.ntohs(client_addr.sin_port));
 }
@@ -218,6 +222,7 @@ Client_Request_Reader_EData :: struct {
 }
 
 client_request_read :: (ev_loop: *Event_Loop.Event_Loop, event_data: *Event_Loop.Event_Data)  {
+    defer Event_Loop.evl_deinit_event_data(event_data);
     ctx := cast(*Client_Request_Reader_EData, event_data.ctx);
     client_socket_fd := ctx.*.socket_fd;
     log("Client request reader called: fd = %, event_loop: %", client_socket_fd, ev_loop.*);
@@ -239,13 +244,14 @@ client_request_read :: (ev_loop: *Event_Loop.Event_Loop, event_data: *Event_Loop
         log("Client disconnected: %", System.get_error_string(POSIX.errno()));
         return;
     }
-    log("Received: %", to_string(buffer.data, read_count));
-    hello := "hello";
-    if Socket.send(client_socket_fd, hello.data, xx hello.count, 0) == -1 {
+    received := to_string(buffer.data, read_count);
+    log("Received: %", received);
+
+    reply := tprint("Hello: %", received);
+    if Socket.send(client_socket_fd, reply.data, xx reply.count, 0) == -1 {
         log_error("send failed: %", System.get_error_string(POSIX.errno()));
         return;
     }
-    log("Sent: hello");
 }
 
 #import "Basic"()(MEMORY_DEBUGGER=true);

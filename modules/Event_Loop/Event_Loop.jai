@@ -23,9 +23,16 @@ Event_Topic :: enum s16 {
         #assert(false, "Unsupported OS");
 }
 
+// @todo
+// Maybe I need to store reference to allocator here?
 Event_Data :: struct {
     ctx: *void;
     callback: (event_loop: *Event_Loop, event_data: *Event_Data);
+}
+
+evl_deinit_event_data :: (using edata: *Event_Data) {
+    free(ctx);
+    free(edata);
 }
 
 evl_init :: () -> Event_Loop {

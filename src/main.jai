@@ -1,10 +1,7 @@
 PORT :: 8080;
 BUFFER_SIZE :: 1024;
 
-Process_Type :: enum {
-    PARENT;
-    CHILD;
-}
+Process_Type :: enum { PARENT; CHILD; }
 
 // @note
 // Global variables are bad (maybe), but I am not doing multithreading in this example
@@ -12,7 +9,7 @@ Process_Type :: enum {
 // so maybe for this situation this is not a problem
 child_pids: [..]s32;
 running   := true;
-fork      := 0;
+fork      := 2;
 
 main :: () {
     defer { reset_temporary_storage(); report_memory_leaks(); }
@@ -27,21 +24,21 @@ main :: () {
 
 master_main_loop :: () {
     set_shutdown_handler(shutdown_handler);
-    listener_socket_fd := setup_listener(PORT);
-    defer POSIX.close(listener_socket_fd);
+    master_socket_fd := setup_listener(PORT);
+    defer POSIX.close(master_socket_fd);
 
-    if !fork worker_main_loop(listener_socket_fd, 0);
+    if !fork worker_main_loop(master_socket_fd, 0);
     else {
         // @investigate
         // What happens to memory allocated in the child process?
         // does memory debugger catch them?
-        master_fork_process(listener_socket_fd);
+        master_fork_process(master_socket_fd);
         master_wait_for_fork_process();
     }
 }
 
-master_fork_process :: (listener_socket_fd: s32) {
-    logger_data := cast(*Custom_Logger_Data, context.logger_data);
+master_fork_process :: (master_socket_fd: s32) {
+    logger_data := cast(*Custom_Logger_Data) context.logger_data;
     assert(logger_data.*.process_type == .PARENT, "This method should only be called from parent process");
     for fork_counter: 0..fork-1 {
         pid := POSIX.fork();
@@ -49,7 +46,7 @@ master_fork_process :: (listener_socket_fd: s32) {
             case 0;
                 logger_data := Custom_Logger_Data.{ .CHILD, POSIX.getpid() };
                 context.logger_data = *logger_data;
-                worker_main_loop(listener_socket_fd, fork_counter);
+                worker_main_loop(master_socket_fd, fork_counter);
                 log("Child process has stopped.");
                 exit(0);
             case -1;
@@ -97,14 +94,17 @@ master_wait_for_fork_process :: () {
 }
 
 setup_listener :: (port: int) -> s32 {
-    listener_socket_fd := Socket.socket(Socket.AF_INET, .STREAM, 0);
-    if listener_socket_fd == -1 {
+    logger_data := cast(*Custom_Logger_Data, context.logger_data);
+    assert(logger_data.*.process_type == .PARENT, "This method should only be called from parent process");
+
+    master_socket_fd := Socket.socket(Socket.AF_INET, .STREAM, 0);
+    if master_socket_fd == -1 {
         log_error("socket creation failed: %", System.get_error_string(POSIX.errno()));
         exit(1);
     }
 
     opt := 1;
-    if Socket.setsockopt(listener_socket_fd, Socket.SOL_SOCKET, Socket.SO_REUSEADDR , *opt, size_of(int)) {
+    if Socket.setsockopt(master_socket_fd, Socket.SOL_SOCKET, Socket.SO_REUSEADDR , *opt, size_of(int)) {
         log_error("setsockopt failed: %", System.get_error_string(POSIX.errno()));
         exit(1);
     }
@@ -116,20 +116,20 @@ setup_listener :: (port: int) -> s32 {
     };
 
     host := "127.0.0.1";
-    if Socket.bind(listener_socket_fd, cast(*Socket.sockaddr, *address), size_of(type_of(address))) == -1 {
+    if Socket.bind(master_socket_fd, cast(*Socket.sockaddr, *address), size_of(type_of(address))) == -1 {
         log_error("bind failed: %", System.get_error_string(POSIX.errno()));
         exit(1);
     }
     number_of_backlog_connections : s32 = 3;
-    if Socket.listen(listener_socket_fd, number_of_backlog_connections) == -1 {
+    if Socket.listen(master_socket_fd, number_of_backlog_connections) == -1 {
         log_error("listen failed: %", System.get_error_string(POSIX.errno()));
         exit(1);
     }
     log("Listening on port %", PORT);
 
-    set_nonblocking(listener_socket_fd);
+    set_nonblocking(master_socket_fd);
 
-    return listener_socket_fd;
+    return master_socket_fd;
 }
 
 set_nonblocking :: (socket_fd: s32) {
@@ -144,7 +144,7 @@ set_nonblocking :: (socket_fd: s32) {
     }
 }
 
-worker_main_loop :: (listener_socket_fd: s32, fork_counter: int) {
+worker_main_loop :: (master_socket_fd: s32, fork_counter: int) {
     ev_loop := Event_Loop.evl_init();
     log("Event loop initialized: %", ev_loop);
     defer Event_Loop.evl_deinit(*ev_loop);
@@ -155,24 +155,19 @@ worker_main_loop :: (listener_socket_fd: s32, fork_counter: int) {
     // MAC has something called QoS which we can use to set priority
     // AFAIK we can't assign specific CPU for a given process on mac
 
-    data := New(Client_Conn_Acceptor_EData);
-    data.* = .{ listener_socket_fd };
-    conn_accept_edata := New(Event_Loop.Event_Data);
-    conn_accept_edata.* = .{ data, connection_acceptor };
-    defer Event_Loop.evl_deinit_event_data(conn_accept_edata);
-
-    Event_Loop.evl_register(*ev_loop, listener_socket_fd, .READ, conn_accept_edata);
+    conn_acceptor := create_client_connection_acceptor(master_socket_fd);
+    defer Event_Loop.evl_deinit_event_data(conn_acceptor);
+    Event_Loop.evl_register(*ev_loop, master_socket_fd, .READ, conn_acceptor);
 
     events: [10]Event_Loop.Event;
     while running {
-        defer {
-            // Adding 1 second delay for debugging - remove later
-            POSIX.usleep(1000_000);
-        }
         log("Polling for events... event_loop: %", ev_loop);
         n_events := Event_Loop.evl_poll(ev_loop, *events);
         if n_events == -1 {
-            log_error("poll failed: %", System.get_error_string(POSIX.errno()));
+            // @todo
+            // Check if error happened because control flow was moved to signal handler
+            // if yes, just do continue
+            log_error("poll failed:(%) %", POSIX.errno(), System.get_error_string(POSIX.errno()));
             continue;
         }
         log("Number of events: %", n_events);
@@ -183,79 +178,13 @@ worker_main_loop :: (listener_socket_fd: s32, fork_counter: int) {
     }
 }
 
-Client_Conn_Acceptor_EData :: struct {
-    // server socket where connection will be accepted
-    socket_fd: s32;
-}
-
-connection_acceptor :: (ev_loop: *Event_Loop.Event_Loop, event_data: *Event_Loop.Event_Data) {
-    ctx := cast(*Client_Conn_Acceptor_EData, event_data.ctx);
-    listener_socket_fd := ctx.*.socket_fd;
-    log("Connection acceptor called. fd = %, event_loop: %", listener_socket_fd, ev_loop.*);
-
-    client_addr: Socket.sockaddr_in;
-    addr_len: Socket.socklen_t = size_of(Socket.sockaddr_in);
-
-    client_socket_fd := Socket.accept(listener_socket_fd, cast(*Socket.sockaddr, *client_addr), *addr_len);
-    if client_socket_fd == -1 {
-        log_error("accept failed: %", System.get_error_string(POSIX.errno()));
-        return;
-    }
-
-    array_add(*ev_loop.registered_fds, client_socket_fd);
-
-    // @note
-    // This gets freed on client_request_read procedure
-    data := New(Client_Request_Reader_EData);
-    data.* = .{ client_socket_fd };
-    client_req_reader_edata := New(Event_Loop.Event_Data);
-    client_req_reader_edata.* = .{ data, client_request_read };
-
-    Event_Loop.evl_register(ev_loop, client_socket_fd, .READ, client_req_reader_edata);
-    log("Accepted connection from %:%", to_string(Socket.inet_ntoa(client_addr.sin_addr)), Socket.ntohs(client_addr.sin_port));
-}
-Client_Request_Reader_EData :: struct {
-    // client socket where data will be read from and written to
-    socket_fd: s32;
-}
-
-client_request_read :: (ev_loop: *Event_Loop.Event_Loop, event_data: *Event_Loop.Event_Data)  {
-    defer Event_Loop.evl_deinit_event_data(event_data);
-    ctx := cast(*Client_Request_Reader_EData, event_data.ctx);
-    client_socket_fd := ctx.*.socket_fd;
-    log("Client request reader called: fd = %, event_loop: %", client_socket_fd, ev_loop.*);
-
-    defer {
-        log("Cleaning up resources for fd = %", client_socket_fd);
-        Event_Loop.evl_unregister(ev_loop, client_socket_fd, .READ);
-        array_unordered_remove_by_value(*ev_loop.registered_fds, client_socket_fd);
-        POSIX.close(client_socket_fd);
-    }
-
-    buffer : [BUFFER_SIZE]u8;
-    read_count := POSIX.read(client_socket_fd, buffer.data, BUFFER_SIZE -1);
-    if read_count == -1 {
-        log_error("read failed: %", System.get_error_string(POSIX.errno()));
-        return;
-    }
-    if read_count == 0 {
-        log("Client disconnected: %", System.get_error_string(POSIX.errno()));
-        return;
-    }
-    received := to_string(buffer.data, read_count);
-    log("Received: %", received);
-
-    reply := tprint("Hello: %", received);
-    if Socket.send(client_socket_fd, reply.data, xx reply.count, 0) == -1 {
-        log_error("send failed: %", System.get_error_string(POSIX.errno()));
-        return;
-    }
-}
-
 #import "Basic"()(MEMORY_DEBUGGER=true);
 Socket :: #import "Socket";
 System :: #import "System";
 POSIX :: #import "POSIX";
 Event_Loop :: #import "Event_Loop";
 #import "Graceful_Shutdown";
+
 #load "custom_logger.jai";
+#load "events/Client_Connection_Acceptor.jai";
+#load "events/Client_Connection_Reader.jai";

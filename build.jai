@@ -7,6 +7,12 @@ build:: () {
     set_working_directory(#filepath);
     make_directory_if_it_does_not_exist("out");
 
+    modules_path := join(#filepath, "src/modules");
+    modules_paths: [..] string;
+    array_add(*modules_paths, modules_path);
+    array_add(*modules_paths, ..options.import_path);
+    options.import_path = modules_paths;
+
     options.output_path =  "out" ;
     options.output_executable_name = "mini-nginx";
 

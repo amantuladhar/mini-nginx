@@ -127,7 +127,7 @@ setup_listener :: (port: int) -> s32 {
     }
     log("Listening on port %", PORT);
 
-    // set_nonblocking(listener_socket_fd);
+    set_nonblocking(listener_socket_fd);
 
     return listener_socket_fd;
 }
@@ -145,8 +145,6 @@ set_nonblocking :: (socket_fd: s32) {
 }
 
 worker_main_loop :: (listener_socket_fd: s32, fork_counter: int) {
-    set_nonblocking(listener_socket_fd);
-
     ev_loop := Event_Loop.evl_init();
     log("Event loop initialized: %", ev_loop);
     defer Event_Loop.evl_deinit(*ev_loop);

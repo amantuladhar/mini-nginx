@@ -29,10 +29,16 @@ client_conn_acceptor :: (ev_loop: *Event_Loop.Event_Loop, event_data: *Event_Loo
     array_add(*ev_loop.registered_fds, client_socket_fd);
 
     // This gets freed on procedure that gets called when read event is triggered
-    req_reader := create_client_request_reader(client_socket_fd);
-    Event_Loop.evl_register(ev_loop, client_socket_fd, .READ, req_reader);
+    // req_reader := create_client_request_reader(client_socket_fd);
+    // Event_Loop.evl_register(ev_loop, client_socket_fd, .READ, req_reader);
 
-    client_address := to_string(Socket.inet_ntoa(client_addr.sin_addr));
-    client_port := Socket.ntohs(client_addr.sin_port);
-    log("Accepted connection from %:%", client_address, client_port);
+    // client_address := to_string(Socket.inet_ntoa(client_addr.sin_addr));
+    // client_port := Socket.ntohs(client_addr.sin_port);
+    // log("Accepted connection from %:%", client_address, client_port);
+
+    worker := create_proxy_worker(master_socket_fd, client_socket_fd);
+    worker_edata := New(Event_Loop.Event_Data);
+    worker_edata.* = .{*worker, proxy_worker_process };
+
+    Event_Loop.evl_register(ev_loop, client_socket_fd, .READ, worker_edata);
 }

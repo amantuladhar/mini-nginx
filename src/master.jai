@@ -13,6 +13,19 @@ master_main_loop :: () {
     }
 }
 
+set_nonblocking :: (socket_fd: s32) {
+    flags := POSIX.fcntl(socket_fd, POSIX.F_GETFL, 0);
+    if flags == -1 {
+        log_error("fcntl failed: %", System.get_error_string(POSIX.errno()));
+        exit(1);
+    }
+    if POSIX.fcntl(socket_fd, POSIX.F_SETFL, flags | POSIX.O_NONBLOCK) == -1 {
+        log_error("fcntl failed: %", System.get_error_string(POSIX.errno()));
+        exit(1);
+    }
+}
+
+
 #scope_file
 
 master_fork_process :: (master_socket_fd: s32) {
@@ -108,16 +121,4 @@ setup_master_listener :: (port: int) -> s32 {
     set_nonblocking(master_socket_fd);
 
     return master_socket_fd;
-}
-
-set_nonblocking :: (socket_fd: s32) {
-    flags := POSIX.fcntl(socket_fd, POSIX.F_GETFL, 0);
-    if flags == -1 {
-        log_error("fcntl failed: %", System.get_error_string(POSIX.errno()));
-        exit(1);
-    }
-    if POSIX.fcntl(socket_fd, POSIX.F_SETFL, flags | POSIX.O_NONBLOCK) == -1 {
-        log_error("fcntl failed: %", System.get_error_string(POSIX.errno()));
-        exit(1);
-    }
 }

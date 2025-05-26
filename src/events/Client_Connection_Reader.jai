@@ -13,12 +13,16 @@ Client_Request_Reader_EData :: struct {
 }
 
 client_request_read :: (ev_loop: *Event_Loop.Event_Loop, event_data: *Event_Loop.Event_Data)  {
-    // @note
-    // clean up event data - as connection will get closed after this request is complete.
-    // maybe we can't do this later, when we introduce one more layer where we proxy request to backend
-    defer Event_Loop.evl_deinit_event_data(event_data);
+    mark := get_temporary_storage_mark();
+    defer {
+        set_temporary_storage_mark(mark);
+        // @note
+        // clean up event data - as connection will get closed after this request is complete.
+        // maybe we can't do this later, when we introduce one more layer where we proxy request to backend
+        Event_Loop.evl_deinit_event_data(event_data);
+    }
 
-    ctx := cast(*Client_Request_Reader_EData, event_data.ctx);
+    ctx := cast(*Client_Request_Reader_EData) event_data.ctx;
     client_socket_fd := ctx.*.socket_fd;
     log("Client request reader called: fd = %, event_loop: %", client_socket_fd, ev_loop.*);
 
@@ -28,22 +32,31 @@ client_request_read :: (ev_loop: *Event_Loop.Event_Loop, event_data: *Event_Loop
         array_unordered_remove_by_value(*ev_loop.registered_fds, client_socket_fd);
         POSIX.close(client_socket_fd);
     }
+    success, request := Http.http_read_request(client_socket_fd);
+    defer Http.http_deinit(*request);
 
-    buffer : [BUFFER_SIZE]u8;
-    read_count := POSIX.read(client_socket_fd, buffer.data, BUFFER_SIZE -1);
-    if read_count == -1 {
-        log_error("read failed: %", System.get_error_string(POSIX.errno()));
+    if !success {
+        log_error("Failed to read HTTP request");
         return;
     }
-    if read_count == 0 {
-        log("Client disconnected: %", System.get_error_string(POSIX.errno()));
-        return;
-    }
-    received := to_string(buffer.data, read_count);
-    log("Received: %", received);
 
-    reply := tprint("Hello: %", received);
-    if Socket.send(client_socket_fd, reply.data, xx reply.count, 0) == -1 {
+    http_res := Http.http_init_res();
+    Http.http_res_add_header(*http_res, "Content-Type", "text/plain");
+    Http.http_res_set_body(*http_res, "Hello, HTTP!!!");
+    bytes := Http.http_res_to_bytes(*http_res);
+
+    test := string.{bytes.count, bytes.data};
+    log("---- <\n%\n> ----", test);
+
+//     reply := #string DONE
+// HTTP/1.1 200 OK
+// Content-Type: text/plain
+// Content-Length: 13
+
+// Hello, HTTP!!!
+//     DONE;
+
+    if Socket.send(client_socket_fd, bytes.data, xx bytes.count, 0) == -1 {
         log_error("send failed: %", System.get_error_string(POSIX.errno()));
         return;
     }

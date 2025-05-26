@@ -16,7 +16,7 @@ build:: () {
     options.output_path =  "out" ;
     options.output_executable_name = "mini-nginx";
 
-    // set_optimization(*options, .OPTIMIZED);
+    set_optimization(*options, .VERY_DEBUG);
     set_build_options(options, w);
 
     add_build_file(join("src", "main.jai", separator="/"), w);

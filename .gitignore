@@ -1,6 +1,9 @@
+.DS_Store
+zig-out/
+.zig-cache/
+
 .build
 out/
 jails.json
 
-.DS_Store
 .idea/

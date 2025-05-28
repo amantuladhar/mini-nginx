@@ -36,5 +36,6 @@ Hash_Table    :: #import "Hash_Table";
 #load "custom_logger.jai";
 #load "events/Client_Connection_Acceptor.jai";
 #load "events/Client_Connection_Reader.jai";
+#load "events/Client_Worker.jai";
 #load "master.jai";
 #load "worker.jai";

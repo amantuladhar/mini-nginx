@@ -8,7 +8,8 @@ Event_Topic :: enum s16 {
         case .LINUX;
             READ :: Linux.EPOLLIN | Linux.EPOLLET;
         case .MACOS;
-            READ :: MacOS.Kevent_Filter.READ;
+            READ  :: MacOS.Kevent_Filter.READ;
+            WRITE :: MacOS.Kevent_Filter.WRITE;
         case;
             #assert(false, "Unsupported OS");
     }
@@ -51,7 +52,7 @@ evl_deinit :: (ev: *Event_Loop) {
     free(ev.registered_fds.data);
 }
 
-evl_register :: (ev: *Event_Loop, which_fd: s32, topic: Event_Topic, event_data: *Event_Data) {
+evl_register :: (ev: *Event_Loop, which_fd: s32, topic: Event_Topic, event_data: *Event_Data, $one_shot: bool = false) {
     #if OS == {
         case .LINUX;
             #assert(false, "Not implemented yet");
@@ -60,7 +61,8 @@ evl_register :: (ev: *Event_Loop, which_fd: s32, topic: Event_Topic, event_data:
                 .{
                     ident = xx which_fd,
                     filter = xx topic,
-                    flags = MacOS.Kevent_Flags.ADD | MacOS.Kevent_Flags.ENABLE,
+                    flags = MacOS.Kevent_Flags.ADD  |
+                                ifx one_shot MacOS.Kevent_Flags.ONESHOT else MacOS.Kevent_Flags.ENABLE,
                     fflags = 0,
                     data = 0,
                     udata = cast(*void, event_data),

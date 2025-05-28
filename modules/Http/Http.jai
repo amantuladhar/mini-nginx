@@ -185,35 +185,20 @@ parse_http_method :: (method: string) -> Http_Method {
 }
 
 read_exact :: (using reader: *Socket_Reader, size: u16) -> success: bool, bytes: []u8 {
-    // check if already we have enough data in the buffer already
+    // if we have enough data in the read buffer, then do early return
     if buffer.count - read_pos >= size {
         bytes := array_view(reader.buffer, reader.read_pos, size);
         reader.read_pos += size;
         return success = true, bytes = bytes;
     }
 
-    BUFFER_SIZE      :: 100;
-    chunk_buffer     : [BUFFER_SIZE]u8;
     total_read_count : u16 = 0;
 
-    while !reader.socket_exhausted && total_read_count <= size {
-        read_count := POSIX.read(reader.socket_fd, chunk_buffer.data, size);
+    while !socket_exhausted && total_read_count <= size {
+        success, read_count := socket_read_exact(reader, size);
+        total_read_count += read_count;
 
-        if read_count == {
-            case -1;
-                error := POSIX.errno();
-                if error == POSIX.EINTR continue; // @todo Need to handle EAGAIN, EWOULDBLOCK
-                log_error("read failed: %", System.get_error_string(error));
-                return success = false, bytes = .[];
-            case 0;
-                reader.socket_exhausted = true;
-                break;
-            case;
-                array_add(*reader.buffer, .. array_view(chunk_buffer, 0, read_count));
-                total_read_count += xx read_count;
-                if read_count < size reader.socket_exhausted = true;
-                if reader.buffer.count - reader.read_pos >= size break;
-        }
+        if reader.buffer.count - reader.read_pos >= size break;
     }
 
     min   := ifx size < reader.buffer.count - reader.read_pos then size
@@ -275,4 +260,32 @@ read_until :: (reader: *Socket_Reader, delimiter: u8, $max_count: u16 = 4096) ->
     bytes := array_view(reader.buffer, reader.read_pos, local_read_pos - reader.read_pos);
     reader.read_pos = local_read_pos;
     return success = true, bytes = bytes;
+}
+
+socket_read_exact :: (using reader: *Socket_Reader, size: u16) -> success: bool, read_count: u16 {
+    if socket_exhausted return success = false, read_count = 0;
+
+    BUFFER_SIZE      :: 100; // this can be smaller maybe 1 so we can get close to exact but maybe doesn't matter;
+    chunk_buffer     : [BUFFER_SIZE]u8;
+    local_read_count : u16 = 0;
+
+    while !socket_exhausted && local_read_count < size {
+        read_count   := POSIX.read(reader.socket_fd, chunk_buffer.data, size);
+
+        if read_count == {
+            case -1;
+                error := POSIX.errno();
+                if error == POSIX.EINTR // @todo Need to handle EAGAIN, EWOULDBLOCK
+                    socket_read_exact(reader, size); // try again???
+                log_error("read failed: %", System.get_error_string(error));
+                return success = false, read_count = 0;
+            case 0;
+                socket_exhausted = true;
+            case;
+                local_read_count += xx read_count;
+                array_add(*buffer, .. array_view(chunk_buffer, 0, read_count));
+                if read_count < size socket_exhausted = true;
+        }
+    }
+    return success = true, read_count = local_read_count;
 }

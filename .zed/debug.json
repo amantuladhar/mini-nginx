@@ -3,12 +3,12 @@
     "label": "Debug mini nginx",
     "adapter": "CodeLLDB",
     "request": "launch",
-    "program": "./zig-out/bin/mini_nginx",
+    "program": "./out/mini-nginx",
     "cwd": "$ZED_WORKTREE_ROOT",
     "build": {
       "label": "Compile mini nginx for debugging",
-      "command": "zig",
-      "args": ["build"]
+      "command": "jai",
+      "args": ["build.jai"]
     }
   }
 ]

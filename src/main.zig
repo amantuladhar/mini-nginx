@@ -72,7 +72,57 @@ pub fn main() !void {
         std.log.err("call to read failed: {any}", .{result});
         std.process.exit(1);
     }
-    const reply = std.fmt.allocPrint(gpa, "Reply from '{s}' for: {s}\n", .{ cli_args.msg, buffer[0..@intCast(read_count)] }) catch unreachable;
+
+    // proxy if proxy port is set
+    const proxy_resp = blk: {
+        if (cli_args.proxy_port) |proxy_port| {
+            const proxy_addr: [4]u8 = .{ 127, 0, 0, 1 };
+            const proxy_fd = c.socket(posix.AF.INET, posix.SOCK.STREAM, 0);
+            result = posix.errno(proxy_fd);
+            if (result != .SUCCESS) {
+                std.log.err("proxy socket call failed, {any}", .{result});
+                std.process.exit(1);
+            }
+            defer _ = c.close(proxy_fd);
+            const proxy_sock_addr_in: posix.sockaddr.in = .{
+                .family = posix.AF.INET,
+                .addr = @as(*align(1) const u32, @ptrCast(&proxy_addr)).*,
+                .port = std.mem.nativeToBig(u16, proxy_port),
+            };
+            result = posix.errno(c.connect(proxy_fd, @ptrCast(&proxy_sock_addr_in), @sizeOf(@TypeOf(proxy_sock_addr_in))));
+            if (result != .SUCCESS) {
+                // INPROGRESS needs to be handled
+                std.log.err("proxy connect call failed, {any}", .{result});
+                std.process.exit(1);
+            }
+
+            result = posix.errno(c.send(proxy_fd, buffer[0..@intCast(read_count)].ptr, @intCast(read_count), 0));
+            if (result != .SUCCESS) {
+                std.log.err("proxy send call failed, {any}", .{result});
+                std.process.exit(1);
+            }
+
+            var proxy_buffer: [BUFFER_SIZE]u8 = .{0} ** BUFFER_SIZE;
+            const proxy_read_count = c.read(proxy_fd, proxy_buffer[0..BUFFER_SIZE].ptr, BUFFER_SIZE);
+            result = posix.errno(proxy_read_count);
+            if (result != .SUCCESS) {
+                std.log.err("proxy read call failed, {any}", .{result});
+                std.process.exit(1);
+            }
+            break :blk proxy_buffer[0..@intCast(proxy_read_count)];
+        }
+        break :blk "";
+    };
+
+    const reply = std.fmt.allocPrint(
+        gpa,
+        "Reply from '{s}' for: {s}\nProxy Resp: '{s}'",
+        .{
+            cli_args.msg,
+            buffer[0..@intCast(read_count)],
+            proxy_resp,
+        },
+    ) catch unreachable;
     defer gpa.free(reply);
 
     result = posix.errno(c.send(client_fd, reply.ptr, reply.len, 0));

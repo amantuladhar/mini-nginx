@@ -47,7 +47,11 @@ http_resp_set_status_code :: (resp: *Http_Response, status_code: Http_Status_Cod
    resp.status_code = status_code;
 }
 
-http_read_request :: (socket_fd: s32) -> success: bool = true, req: Http_Request {
+http_read_response :: (socket_fd: s32) -> success: bool = true, resp: Http_Response {
+    reader := socket_reader_init(socket_fd);
+}
+
+http_parse_request :: (socket_fd: s32) -> success: bool = true, req: Http_Request {
     reader := socket_reader_init(socket_fd);
 
     _, status_line := read_until(*reader, "\n");
@@ -169,6 +173,11 @@ socket_reader_deinit :: (reader: *Socket_Reader) {
     free(reader.buffer.data);
 }
 
+parse_http_response :: (*resp: *Http_Response, reader: *Socket_Reader) {
+    _, status_line := read_until(*reader, "\n");
+
+}
+
 parse_http_method :: (method: string) -> Http_Method {
     if method == {
         case "GET"; #through;
@@ -190,7 +199,7 @@ parse_http_method :: (method: string) -> Http_Method {
     return .GET; // Default to GET if method is unknown
 }
 
-read_exact :: (using reader: *Socket_Reader, size: u16) -> success: bool, bytes: []u8 {
+read_exact :: (using reader: *Socket_Reader, size: u16) -> success: bool, bytes: u8 {
     // if we have enough data in the read buffer, then do early return
     if buffer.count - read_pos >= size {
         bytes := array_view(reader.buffer, reader.read_pos, size);
@@ -244,7 +253,7 @@ read_until :: (using reader: *Socket_Reader, delimiter: u8, $max_count: u16 = 40
     return success = false, bytes = bytes;
 }
 
-socket_read_exact :: (using reader: *Socket_Reader, size: u16) -> success: bool, read_count: u16 {
+socket_fill_exact :: (using reader: *Socket_Reader, size: u16) -> success: bool, read_count: u16 {
     if socket_exhausted return success = false, read_count = 0;
 
     BUFFER_SIZE      :: 100; // this can be smaller maybe 1 so we can get close to exact but maybe doesn't matter;

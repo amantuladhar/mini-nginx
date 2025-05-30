@@ -131,6 +131,13 @@ pub fn main() !void {
         std.process.exit(1);
     }
 }
+
+const EventLoop = struct {
+    queue_fd: i32,
+
+    pub fn init() !EventLoop {}
+};
+
 const CliArgs = struct {
     port: u16 = 8080,
     msg: []const u8 = "[server 1]",

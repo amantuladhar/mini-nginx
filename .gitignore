@@ -6,5 +6,4 @@ zig-out/
 out/
 jails.json
 
-.DS_Store
 .idea/

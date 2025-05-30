@@ -2,8 +2,10 @@ pub fn main() !void {
     const gpa, const deinit = getAllocator();
     defer _ = if (deinit) debug_allocator.deinit();
 
+    const cli_args: CliArgs = try .parse();
+
     const server: [4]u8 = .{0} ** 4;
-    const server_port: u16 = 8080;
+    const server_port: u16 = cli_args.port;
 
     const server_fd = c.socket(posix.AF.INET, posix.SOCK.STREAM, 0);
     var result = posix.errno(server_fd);
@@ -48,7 +50,7 @@ pub fn main() !void {
         std.process.exit(1);
     }
 
-    std.log.info("Waiting for client connection: \n", .{});
+    std.log.info("Waiting for client connection:\nport: {d}\nmsg: {s}\nproxy_port: {d}", .{ cli_args.port, cli_args.msg, cli_args.proxy_port orelse 0 });
 
     var client_addr: posix.sockaddr.in = undefined;
     var client_addr_len: posix.socklen_t = @sizeOf(@TypeOf(client_addr));
@@ -59,7 +61,7 @@ pub fn main() !void {
         std.process.exit(1);
     }
     defer _ = c.close(client_fd);
-    std.log.info("Connection from client accepted: {any}\n", .{client_addr});
+    std.log.info("Connection from client accepted: {any}", .{client_addr});
 
     const BUFFER_SIZE = 4096;
     var buffer: [BUFFER_SIZE]u8 = .{0} ** BUFFER_SIZE;
@@ -70,7 +72,7 @@ pub fn main() !void {
         std.log.err("call to read failed: {any}", .{result});
         std.process.exit(1);
     }
-    const reply = std.fmt.allocPrint(gpa, "Reply to: {s}", .{buffer[0..@intCast(read_count)]}) catch unreachable;
+    const reply = std.fmt.allocPrint(gpa, "Reply from '{s}' for: {s}\n", .{ cli_args.msg, buffer[0..@intCast(read_count)] }) catch unreachable;
     defer gpa.free(reply);
 
     result = posix.errno(c.send(client_fd, reply.ptr, reply.len, 0));
@@ -79,6 +81,37 @@ pub fn main() !void {
         std.process.exit(1);
     }
 }
+const CliArgs = struct {
+    port: u16 = 8080,
+    msg: []const u8 = "[server 1]",
+    proxy_port: ?u16 = null,
+
+    pub fn parse() !CliArgs {
+        var args = std.process.args();
+        _ = args.next();
+
+        var cli_args: CliArgs = .{};
+
+        while (args.next()) |arg| {
+            if (std.mem.eql(u8, "--port", arg)) {
+                const port = args.next() orelse unreachable;
+                cli_args.port = try std.fmt.parseInt(u16, port, 10);
+                continue;
+            }
+            if (std.mem.eql(u8, "--msg", arg)) {
+                const msg = args.next() orelse unreachable;
+                cli_args.msg = msg;
+                continue;
+            }
+            if (std.mem.eql(u8, "--proxy-port", arg)) {
+                const proxy_port = args.next() orelse unreachable;
+                cli_args.proxy_port = try std.fmt.parseInt(u16, proxy_port, 10);
+                continue;
+            }
+        }
+        return cli_args;
+    }
+};
 
 fn getAllocator() struct { Allocator, bool } {
     return switch (builtin.mode) {

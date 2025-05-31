@@ -32,7 +32,7 @@ client_request_read :: (ev_loop: *Event_Loop.Event_Loop, event_data: *Event_Loop
         array_unordered_remove_by_value(*ev_loop.registered_fds, client_socket_fd);
         POSIX.close(client_socket_fd);
     }
-    success, request := Http.http_read_request(client_socket_fd);
+    success, request := Http.http_parse_request(client_socket_fd);
     defer Http.http_deinit(*request);
 
     if !success {

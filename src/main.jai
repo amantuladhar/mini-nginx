@@ -33,9 +33,8 @@ Event_Loop    :: #import "Event_Loop";
 Http          :: #import "Http";
 Hash_Table    :: #import "Hash_Table";
 
-#load "custom_logger.jai";
-#load "events/Client_Connection_Acceptor.jai";
-#load "events/Client_Connection_Reader.jai";
-#load "events/Client_Worker.jai";
 #load "master.jai";
 #load "worker.jai";
+#load "events/Client_Connection_Acceptor.jai";
+#load "events/Client_Connection_Reader.jai";
+#load "custom_logger.jai";

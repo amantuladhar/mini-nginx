@@ -47,8 +47,12 @@ http_resp_set_status_code :: (resp: *Http_Response, status_code: Http_Status_Cod
    resp.status_code = status_code;
 }
 
-http_read_response :: (socket_fd: s32) -> success: bool = true, resp: Http_Response {
+http_parse_response :: (socket_fd: s32) -> []u8 {
     reader := socket_reader_init(socket_fd);
+    while !reader.socket_exhausted {
+        socket_fill_exact(*reader, 4096);
+    }
+    return reader.buffer;
 }
 
 http_parse_request :: (socket_fd: s32) -> success: bool = true, req: Http_Request {
@@ -75,7 +79,6 @@ http_parse_request :: (socket_fd: s32) -> success: bool = true, req: Http_Reques
     body: []u8 = .[];
     if content_length_str {
         content_length := string_to_int(content_length_str.*, T = u16);
-
         _, body = read_exact(*reader, xx content_length);
         body_str := to_string(body.data, body.count);
     }
@@ -142,8 +145,6 @@ http_resp_deinit :: (using resp: *Http_Response) {
     free(body.data,, allocator);
 }
 
-#scope_file
-
 array_add :: (array: *[..] $T, item: *T, count: int) #no_abc {
     for 0..count - 1 array_add(array, (item + it).*);
 }
@@ -173,9 +174,8 @@ socket_reader_deinit :: (reader: *Socket_Reader) {
     free(reader.buffer.data);
 }
 
-parse_http_response :: (*resp: *Http_Response, reader: *Socket_Reader) {
+parse_http_response :: (resp: *Http_Response, reader: *Socket_Reader) {
     _, status_line := read_until(*reader, "\n");
-
 }
 
 parse_http_method :: (method: string) -> Http_Method {
@@ -199,7 +199,7 @@ parse_http_method :: (method: string) -> Http_Method {
     return .GET; // Default to GET if method is unknown
 }
 
-read_exact :: (using reader: *Socket_Reader, size: u16) -> success: bool, bytes: u8 {
+read_exact :: (using reader: *Socket_Reader, size: u16) -> success: bool, bytes: []u8 {
     // if we have enough data in the read buffer, then do early return
     if buffer.count - read_pos >= size {
         bytes := array_view(reader.buffer, reader.read_pos, size);
@@ -210,7 +210,7 @@ read_exact :: (using reader: *Socket_Reader, size: u16) -> success: bool, bytes:
     total_read_count : u16 = 0;
 
     while !socket_exhausted && total_read_count <= size {
-        _, read_count := socket_read_exact(reader, size);
+        _, read_count := socket_fill_exact(reader, size);
         total_read_count += read_count;
 
         if reader.buffer.count - reader.read_pos >= size break;
@@ -224,6 +224,14 @@ read_exact :: (using reader: *Socket_Reader, size: u16) -> success: bool, bytes:
     return success = true, bytes = bytes;
 }
 
+read_all :: (using reader: *Socket_Reader, $max_count: u16 = 4096) -> []u8 {
+    while !reader.socket_exhausted {
+        socket_fill_exact(reader, max_count);
+    }
+    bytes := array_view(buffer, read_pos, buffer.count - read_pos);
+    reader.read_pos = xx buffer.count;
+    return bytes;
+}
 
 read_until :: (using reader: *Socket_Reader, delimiter: u8, $max_count: u16 = 4096) -> success: bool = true, bytes: []u8 {
     return_if_delimiter_found :: #code {
@@ -241,7 +249,7 @@ read_until :: (using reader: *Socket_Reader, delimiter: u8, $max_count: u16 = 40
 
     local_read_count : u16 = 0;
     while !socket_exhausted && local_read_count <= max_count {
-        _, read_count := socket_read_exact(reader, 100);
+        _, read_count := socket_fill_exact(reader, 100);
         local_read_count += read_count;
 
         #insert return_if_delimiter_found;
@@ -267,7 +275,7 @@ socket_fill_exact :: (using reader: *Socket_Reader, size: u16) -> success: bool,
             case -1;
                 error := POSIX.errno();
                 if error == POSIX.EINTR // @todo Need to handle EAGAIN, EWOULDBLOCK
-                    socket_read_exact(reader, size); // try again???
+                    socket_fill_exact(reader, size); // try again???
                 log_error("read failed: %", System.get_error_string(error));
                 return success = false, read_count = 0;
             case 0;

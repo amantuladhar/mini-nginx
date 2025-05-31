@@ -106,7 +106,6 @@ setup_master_listener :: (port: int) -> s32 {
         sin_port = Socket.htons(PORT),
     };
 
-    host := "127.0.0.1";
     if Socket.bind(master_socket_fd, cast(*Socket.sockaddr, *address), size_of(type_of(address))) == -1 {
         log_error("bind failed: %", System.get_error_string(POSIX.errno()));
         exit(1);

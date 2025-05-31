@@ -54,6 +54,20 @@ http_parse_response :: (socket_fd: s32) -> []u8 {
     }
     return reader.buffer;
 }
+// @todo - send actual response
+http_response_parse_bytes :: (reader: *Socket_Reader) -> []u8 {
+log("http_response_parse_bytes: before fill view");
+    // @todo - probably bad as this is reading until nothing can be read
+    while !reader.socket_exhausted  {
+        log("-- calling fill exact");
+        success, read_count := socket_fill_exact(reader, 4096);
+        log("-- after fill exact: %", read_count);
+    }
+
+    log("http_response_parse_bytes: before view");
+
+    return array_view(reader.buffer, reader.read_pos, reader.buffer.count - reader.read_pos);
+}
 
 http_parse_request :: (socket_fd: s32) -> success: bool = true, req: Http_Request {
     reader := socket_reader_init(socket_fd);
@@ -88,6 +102,7 @@ http_parse_request :: (socket_fd: s32) -> success: bool = true, req: Http_Reques
         path    = string.{path_i - method_i, status_line.data + method_i + 1},
         headers = headers,
         body = body,
+        socket_reader = reader,
     };
 }
 
@@ -269,7 +284,9 @@ socket_fill_exact :: (using reader: *Socket_Reader, size: u16) -> success: bool,
     local_read_count : u16 = 0;
 
     while !socket_exhausted && local_read_count < size {
+        log("before: posix read count:");
         read_count   := POSIX.read(reader.socket_fd, chunk_buffer.data, size);
+        log("posix read count: %", read_count);
 
         if read_count == {
             case -1;
@@ -282,6 +299,7 @@ socket_fill_exact :: (using reader: *Socket_Reader, size: u16) -> success: bool,
                 socket_exhausted = true;
             case;
                 local_read_count += xx read_count;
+                log("socket_fill_exact: read_count: %, total_read_count: %", read_count, local_read_count);
                 array_add(*buffer, .. array_view(chunk_buffer, 0, read_count));
                 if read_count < size socket_exhausted = true;
         }

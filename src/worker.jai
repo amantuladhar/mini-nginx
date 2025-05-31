@@ -18,9 +18,6 @@ worker_main_loop :: (master_socket_fd: s32, fork_counter: int) {
         log("Polling for events... event_loop: %", ev_loop);
         n_events := Event_Loop.evl_poll(ev_loop, *events);
         if n_events == -1 {
-            // @todo
-            // Check if error happened because control flow was moved to signal handler
-            // if yes, just do continue
             log_error("poll failed:(%) %", POSIX.errno(), System.get_error_string(POSIX.errno()));
             continue;
         }

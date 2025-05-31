@@ -2,19 +2,101 @@ pub fn main() !void {
     const gpa, const deinit = getAllocator();
     defer _ = if (deinit) debug_allocator.deinit();
     _ = gpa;
-
     const cli_args: CliArgs = try .parse();
 
     const server: [4]u8 = .{0} ** 4;
     const server_port: u16 = cli_args.port;
 
+    const server_fd = setupMasterSocketListener(server, server_port);
+    defer _ = c.close(server_fd);
+
+    const client_fd = acceptClientConnection(server_fd);
+    defer _ = c.close(client_fd);
+
+    const BUFFER_SIZE = 4096;
+    var buffer: [BUFFER_SIZE]u8 = .{0} ** BUFFER_SIZE;
+    const read_count = readFromSocket(client_fd, &buffer);
+
+    // proxy if proxy port is set
+    const proxy_resp = blk: {
+        if (cli_args.proxy_port) |proxy_port| {
+            const proxy_addr: [4]u8 = .{ 127, 0, 0, 1 };
+            const proxy_fd = connectToBackendProxy(proxy_addr, proxy_port);
+            defer _ = c.close(proxy_fd);
+            sendToSocket(proxy_fd, buffer[0..@intCast(read_count)]);
+
+            var proxy_buffer: [BUFFER_SIZE]u8 = .{0} ** BUFFER_SIZE;
+            const proxy_read_count = readFromSocket(proxy_fd, &proxy_buffer);
+            break :blk proxy_buffer[0..@intCast(proxy_read_count)];
+        }
+        break :blk "";
+    };
+
+    sendToSocket(client_fd, proxy_resp);
+}
+
+fn connectToBackendProxy(addr: [4]u8, port: u16) i32 {
+    const proxy_fd = c.socket(posix.AF.INET, posix.SOCK.STREAM, 0);
+    var result = posix.errno(proxy_fd);
+    if (result != .SUCCESS) {
+        std.log.err("proxy socket call failed, {any}", .{result});
+        std.process.exit(1);
+    }
+    const proxy_sock_addr_in: posix.sockaddr.in = .{
+        .family = posix.AF.INET,
+        .addr = @as(*align(1) const u32, @ptrCast(&addr)).*,
+        .port = std.mem.nativeToBig(u16, port),
+    };
+    result = posix.errno(c.connect(proxy_fd, @ptrCast(&proxy_sock_addr_in), @sizeOf(@TypeOf(proxy_sock_addr_in))));
+    if (result != .SUCCESS) {
+        // INPROGRESS needs to be handled
+        std.log.err("proxy connect call failed, {any}", .{result});
+        std.process.exit(1);
+    }
+    return proxy_fd;
+}
+
+fn sendToSocket(socket: i32, bytes: []const u8) void {
+    // var result = posix.errno(c.send(socket, buffer[0..@intCast(read_count)].ptr, @intCast(read_count), 0));
+    const result = posix.errno(c.send(socket, bytes[0..bytes.len].ptr, bytes.len, 0));
+    if (result != .SUCCESS) {
+        std.log.err("proxy send call failed, {any}", .{result});
+        std.process.exit(1);
+    }
+}
+
+fn readFromSocket(socket: i32, buffer: []u8) isize {
+    const read_count = c.read(socket, buffer[0..buffer.len].ptr, buffer.len);
+    const result = posix.errno(read_count);
+    if (result != .SUCCESS) {
+        std.log.err("call to read failed: {any}", .{result});
+        std.process.exit(1);
+    }
+    return read_count;
+}
+
+fn acceptClientConnection(server_fd: i32) i32 {
+    var client_addr: posix.sockaddr.in = undefined;
+    var client_addr_len: posix.socklen_t = @sizeOf(@TypeOf(client_addr));
+
+    const client_fd = c.accept(server_fd, @ptrCast(&client_addr), &client_addr_len);
+
+    const result = posix.errno(client_fd);
+    if (result != .SUCCESS) {
+        std.log.err("call to accept failed: {any}", .{result});
+        std.process.exit(1);
+    }
+    std.log.info("Connection from client accepted: {any}", .{client_addr});
+    return client_fd;
+}
+
+fn setupMasterSocketListener(server: [4]u8, port: u16) i32 {
     const server_fd = c.socket(posix.AF.INET, posix.SOCK.STREAM, 0);
     var result = posix.errno(server_fd);
     if (result != .SUCCESS) {
         std.log.err("Call to socket failed: {any}", .{result});
         std.process.exit(1);
     }
-    defer _ = c.close(server_fd);
 
     result = posix.errno(c.setsockopt(server_fd, posix.SOL.SOCKET, posix.SO.REUSEADDR, &@as(u32, 1), @sizeOf(u32)));
     if (result != .SUCCESS) {
@@ -25,7 +107,7 @@ pub fn main() !void {
         .family = posix.AF.INET,
         // inet_addr or inet_pton can be used but zig version of struct doesn't have this field. Hmm...
         .addr = @as(*align(1) const u32, @ptrCast(&server)).*,
-        .port = std.mem.nativeToBig(u16, server_port),
+        .port = std.mem.nativeToBig(u16, port),
     };
     result = posix.errno(c.bind(server_fd, @ptrCast(&sock_addr_in), @sizeOf(@TypeOf(sock_addr_in))));
     if (result != .SUCCESS) {
@@ -52,75 +134,9 @@ pub fn main() !void {
         std.process.exit(1);
     }
 
-    std.log.info("Waiting for client connection:\nport: {d}\nmsg: {s}\nproxy_port: {d}", .{ cli_args.port, cli_args.msg, cli_args.proxy_port orelse 0 });
+    std.log.info("Waiting for client connection:\nport: {d}", .{port});
 
-    var client_addr: posix.sockaddr.in = undefined;
-    var client_addr_len: posix.socklen_t = @sizeOf(@TypeOf(client_addr));
-    const client_fd = c.accept(server_fd, @ptrCast(&client_addr), &client_addr_len);
-    result = posix.errno(client_fd);
-    if (result != .SUCCESS) {
-        std.log.err("call to accept failed: {any}", .{result});
-        std.process.exit(1);
-    }
-    defer _ = c.close(client_fd);
-    std.log.info("Connection from client accepted: {any}", .{client_addr});
-
-    const BUFFER_SIZE = 4096;
-    var buffer: [BUFFER_SIZE]u8 = .{0} ** BUFFER_SIZE;
-
-    const read_count = c.read(client_fd, buffer[0..BUFFER_SIZE].ptr, BUFFER_SIZE);
-    result = posix.errno(read_count);
-    if (result != .SUCCESS) {
-        std.log.err("call to read failed: {any}", .{result});
-        std.process.exit(1);
-    }
-
-    // proxy if proxy port is set
-    const proxy_resp = blk: {
-        if (cli_args.proxy_port) |proxy_port| {
-            const proxy_addr: [4]u8 = .{ 127, 0, 0, 1 };
-            const proxy_fd = c.socket(posix.AF.INET, posix.SOCK.STREAM, 0);
-            result = posix.errno(proxy_fd);
-            if (result != .SUCCESS) {
-                std.log.err("proxy socket call failed, {any}", .{result});
-                std.process.exit(1);
-            }
-            defer _ = c.close(proxy_fd);
-            const proxy_sock_addr_in: posix.sockaddr.in = .{
-                .family = posix.AF.INET,
-                .addr = @as(*align(1) const u32, @ptrCast(&proxy_addr)).*,
-                .port = std.mem.nativeToBig(u16, proxy_port),
-            };
-            result = posix.errno(c.connect(proxy_fd, @ptrCast(&proxy_sock_addr_in), @sizeOf(@TypeOf(proxy_sock_addr_in))));
-            if (result != .SUCCESS) {
-                // INPROGRESS needs to be handled
-                std.log.err("proxy connect call failed, {any}", .{result});
-                std.process.exit(1);
-            }
-
-            result = posix.errno(c.send(proxy_fd, buffer[0..@intCast(read_count)].ptr, @intCast(read_count), 0));
-            if (result != .SUCCESS) {
-                std.log.err("proxy send call failed, {any}", .{result});
-                std.process.exit(1);
-            }
-
-            var proxy_buffer: [BUFFER_SIZE]u8 = .{0} ** BUFFER_SIZE;
-            const proxy_read_count = c.read(proxy_fd, proxy_buffer[0..BUFFER_SIZE].ptr, BUFFER_SIZE);
-            result = posix.errno(proxy_read_count);
-            if (result != .SUCCESS) {
-                std.log.err("proxy read call failed, {any}", .{result});
-                std.process.exit(1);
-            }
-            break :blk proxy_buffer[0..@intCast(proxy_read_count)];
-        }
-        break :blk "";
-    };
-
-    result = posix.errno(c.send(client_fd, proxy_resp[0..proxy_resp.len].ptr, proxy_resp.len, 0));
-    if (result != .SUCCESS) {
-        std.log.err("call to send failed, {any}", .{result});
-        std.process.exit(1);
-    }
+    return server_fd;
 }
 
 const EventLoop = struct {

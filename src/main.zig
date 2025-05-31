@@ -1,6 +1,7 @@
 pub fn main() !void {
     const gpa, const deinit = getAllocator();
     defer _ = if (deinit) debug_allocator.deinit();
+    _ = gpa;
 
     const cli_args: CliArgs = try .parse();
 
@@ -22,12 +23,13 @@ pub fn main() !void {
     }
     const sock_addr_in: posix.sockaddr.in = .{
         .family = posix.AF.INET,
+        // inet_addr or inet_pton can be used but zig version of struct doesn't have this field. Hmm...
         .addr = @as(*align(1) const u32, @ptrCast(&server)).*,
         .port = std.mem.nativeToBig(u16, server_port),
     };
     result = posix.errno(c.bind(server_fd, @ptrCast(&sock_addr_in), @sizeOf(@TypeOf(sock_addr_in))));
     if (result != .SUCCESS) {
-        std.log.err("call to bin dfailed: {any}", .{result});
+        std.log.err("call to bind failed: {any}", .{result});
         std.process.exit(1);
     }
 
@@ -114,18 +116,7 @@ pub fn main() !void {
         break :blk "";
     };
 
-    const reply = std.fmt.allocPrint(
-        gpa,
-        "Reply from '{s}' for: {s}\nProxy Resp: '{s}'",
-        .{
-            cli_args.msg,
-            buffer[0..@intCast(read_count)],
-            proxy_resp,
-        },
-    ) catch unreachable;
-    defer gpa.free(reply);
-
-    result = posix.errno(c.send(client_fd, reply.ptr, reply.len, 0));
+    result = posix.errno(c.send(client_fd, proxy_resp[0..proxy_resp.len].ptr, proxy_resp.len, 0));
     if (result != .SUCCESS) {
         std.log.err("call to send failed, {any}", .{result});
         std.process.exit(1);

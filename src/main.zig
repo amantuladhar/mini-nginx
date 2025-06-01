@@ -1,39 +1,131 @@
+const AcceptConnectionEvent = struct {
+    const EventData = EventLoop.EventData;
+
+    server_fd: i32,
+    event_data: *EventData,
+    allocator: Allocator,
+
+    pub fn init(allocator: Allocator, server_fd: i32) *AcceptConnectionEvent {
+        const self = allocator.create(AcceptConnectionEvent) catch unreachable;
+        const event_data = self.allocator.create(EventData) catch unreachable;
+
+        self.* = .{ .server_fd = server_fd, .event_data = event_data, .allocator = allocator };
+
+        event_data.* = .{
+            .ptr = self,
+            .vtable = &.{ .callback = AcceptConnectionEvent.callback },
+        };
+
+        return self;
+    }
+    pub fn deinit(self: *@This()) void {
+        self.allocator.destroy(self.event_data);
+        self.destroy(self);
+    }
+
+    pub fn callback(context: *anyopaque, event_loop: *EventLoop) void {
+        const self: @This() = @ptrCast(@alignCast(context));
+        _ = self;
+        _ = event_loop;
+        std.log.debug("AcceptConnectionEvent called", .{});
+    }
+};
+
 pub fn main() !void {
     const gpa, const deinit = getAllocator();
     defer _ = if (deinit) debug_allocator.deinit();
-    _ = gpa;
+
     const cli_args: CliArgs = try .parse();
+    const loop: EventLoop = .init();
 
     const server: [4]u8 = .{0} ** 4;
     const server_port: u16 = cli_args.port;
-
     const server_fd = setupMasterSocketListener(server, server_port);
     defer _ = c.close(server_fd);
 
-    const client_fd = acceptClientConnection(server_fd);
-    defer _ = c.close(client_fd);
+    const accept_event = AcceptConnectionEvent.init(gpa, server_fd);
+    loop.register(server_fd, .Read, accept_event.event_data);
 
-    const BUFFER_SIZE = 4096;
-    var buffer: [BUFFER_SIZE]u8 = .{0} ** BUFFER_SIZE;
-    const read_count = readFromSocket(client_fd, &buffer);
+    // const client_fd = acceptClientConnection(server_fd);
+    // defer _ = c.close(client_fd);
 
-    // proxy if proxy port is set
-    const proxy_resp = blk: {
-        if (cli_args.proxy_port) |proxy_port| {
-            const proxy_addr: [4]u8 = .{ 127, 0, 0, 1 };
-            const proxy_fd = connectToBackendProxy(proxy_addr, proxy_port);
-            defer _ = c.close(proxy_fd);
-            sendToSocket(proxy_fd, buffer[0..@intCast(read_count)]);
+    // const BUFFER_SIZE = 4096;
+    // var buffer: [BUFFER_SIZE]u8 = .{0} ** BUFFER_SIZE;
+    // const read_count = readFromSocket(client_fd, &buffer);
 
-            var proxy_buffer: [BUFFER_SIZE]u8 = .{0} ** BUFFER_SIZE;
-            const proxy_read_count = readFromSocket(proxy_fd, &proxy_buffer);
-            break :blk proxy_buffer[0..@intCast(proxy_read_count)];
-        }
-        break :blk "";
+    // // proxy if proxy port is set
+    // const proxy_resp = blk: {
+    //     if (cli_args.proxy_port) |proxy_port| {
+    //         const proxy_addr: [4]u8 = .{ 127, 0, 0, 1 };
+    //         const proxy_fd = connectToBackendProxy(proxy_addr, proxy_port);
+    //         defer _ = c.close(proxy_fd);
+    //         sendToSocket(proxy_fd, buffer[0..@intCast(read_count)]);
+
+    //         var proxy_buffer: [BUFFER_SIZE]u8 = .{0} ** BUFFER_SIZE;
+    //         const proxy_read_count = readFromSocket(proxy_fd, &proxy_buffer);
+    //         break :blk proxy_buffer[0..@intCast(proxy_read_count)];
+    //     }
+    //     break :blk "";
+    // };
+
+    // sendToSocket(client_fd, proxy_resp);
+}
+const EventLoop = struct {
+    queue_fd: i32,
+
+    const Event = switch (builtin.os.tag) {
+        .macos => posix.Kevent,
+        else => @compileError("Unsupported OS: " ++ @tagName(builtin.os.tag)),
     };
 
-    sendToSocket(client_fd, proxy_resp);
-}
+    const Interest = enum(comptime_int) {
+        Read = std.c.EVFILT.READ,
+    };
+
+    const EventData = struct {
+        ptr: *anyopaque,
+        vtable: *const VTable,
+
+        const VTable = struct {
+            callback: fn (self: *anyopaque, event_loop: *EventLoop) void,
+        };
+
+        pub fn callback(self: *EventData, event_loop: *EventLoop) void {
+            self.vtable.callback(self.ptr, event_loop);
+        }
+    };
+
+    pub fn init() EventLoop {
+        const queue_fd = c.kqueue();
+        if (posix.errno() != .SUCCESS) {
+            std.log.err("kqueue call failed: {any}", .{posix.errno()});
+            std.process.exit(1);
+        }
+        return .{ .queue_fd = queue_fd };
+    }
+
+    pub fn deinit(self: *EventLoop) void {
+        _ = c.close(self.queue_fd);
+    }
+
+    pub fn register(self: *const EventLoop, where: i32, what: Interest, event_data: *EventData) void {
+        const data = @intFromPtr(event_data);
+        const changelist: [1]Event = [_]Event{.{
+            .ident = @intCast(where),
+            .filter = @intFromEnum(what),
+            .flags = std.c.EV.ADD | std.c.EV.ENABLE,
+            .fflags = 0,
+            .data = 0,
+            .udata = data,
+        }};
+        var events: [0]Event = undefined;
+        const result = c.kevent64(self.queue_fd, changelist[0..1].ptr, 1, events[0..0], 0, null);
+        if (posix.errno(result) != .SUCCESS) {
+            std.log.err("kevent call failed: {any}", .{posix.errno()});
+            std.process.exit(1);
+        }
+    }
+};
 
 fn connectToBackendProxy(addr: [4]u8, port: u16) i32 {
     const proxy_fd = c.socket(posix.AF.INET, posix.SOCK.STREAM, 0);
@@ -138,12 +230,6 @@ fn setupMasterSocketListener(server: [4]u8, port: u16) i32 {
 
     return server_fd;
 }
-
-const EventLoop = struct {
-    queue_fd: i32,
-
-    pub fn init() !EventLoop {}
-};
 
 const CliArgs = struct {
     port: u16 = 8080,

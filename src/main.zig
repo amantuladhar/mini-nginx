@@ -40,11 +40,11 @@ pub fn main() !void {
     // sendToSocket(client_fd, proxy_resp);
 }
 const AcceptConnectionEvent = struct {
-    const EventData = EventLoop.EventData;
-
     server_fd: i32,
     event_data: *EventData,
     allocator: Allocator,
+
+    const EventData = EventLoop.EventData;
 
     pub fn init(allocator: Allocator, server_fd: i32) *AcceptConnectionEvent {
         const self = allocator.create(AcceptConnectionEvent) catch unreachable;
@@ -61,14 +61,112 @@ const AcceptConnectionEvent = struct {
     }
     pub fn deinit(self: *@This()) void {
         self.allocator.destroy(self.event_data);
-        self.destroy(self);
+        self.allocator.destroy(self);
     }
 
     pub fn callback(context: *anyopaque, event_loop: *EventLoop) void {
         const self: *AcceptConnectionEvent = @ptrCast(@alignCast(context));
-        _ = self;
-        _ = event_loop;
         std.log.debug("AcceptConnectionEvent called", .{});
+
+        const client_fd = acceptClientConnection(self.server_fd);
+
+        // @todo - allocator maybe should be args to function
+        const proxy_work_event = ProxyWorkEvent.init(self.allocator, self.server_fd, client_fd);
+        event_loop.register(client_fd, .Read, proxy_work_event.event_data);
+    }
+};
+
+const ProxyWorkEvent = struct {
+    server_fd: i32,
+    client_fd: i32,
+    proxy_fd: ?i32 = null,
+    state: State = .WaitingClientRead,
+    event_data: *EventData,
+    request_buffer: [4096]u8 = .{0} ** 4096,
+    request_buffer_read_count: isize = 0,
+    proxy_response_buffer: [4096]u8 = .{0} ** 4096,
+    proxy_response_buffer_read_count: isize = 0,
+    allocator: Allocator,
+
+    const EventData = EventLoop.EventData;
+    const Self = @This();
+
+    const State = enum {
+        WaitingClientRead,
+        WaitingProxyWrite,
+        WaitingProxyRead,
+        Complete,
+        Error,
+
+        pub fn transition(self: State) State {
+            return switch (self) {
+                .WaitingClientRead => .WaitingProxyWrite,
+                .WaitingProxyWrite => .WaitingProxyRead,
+                .WaitingProxyRead => .Complete,
+                else => unreachable,
+            };
+        }
+    };
+
+    pub fn init(allocator: Allocator, server_fd: i32, client_fd: i32) *Self {
+        const self = allocator.create(Self) catch unreachable;
+        const event_data = allocator.create(EventData) catch unreachable;
+
+        self.* = .{
+            .event_data = event_data,
+            .allocator = allocator,
+
+            .server_fd = server_fd,
+            .client_fd = client_fd,
+        };
+
+        event_data.* = .{
+            .ptr = self,
+            .vtable = &.{ .callback = @This().callback },
+        };
+
+        return self;
+    }
+
+    pub fn deinit(self: *@This()) void {
+        if (self.proxy_fd) |fd| {
+            _ = c.close(fd);
+        }
+        _ = c.close(self.client_fd);
+        self.allocator.destroy(self.event_data);
+        self.allocator.destroy(self);
+    }
+
+    pub fn callback(context: *anyopaque, event_loop: *EventLoop) void {
+        const self: *@This() = @ptrCast(@alignCast(context));
+        std.log.debug("ProxyWorkEvent:: callback", .{});
+
+        switch (self.state) {
+            .WaitingClientRead => {
+                self.request_buffer_read_count = readFromSocket(self.client_fd, &self.request_buffer);
+                self.proxy_fd = connectToBackendProxy(.{ 127, 0, 0, 1 }, 9999);
+                event_loop.registerWithOption(self.proxy_fd.?, .Write, self.event_data, .{ .oneshot = true });
+                self.state = self.state.transition();
+            },
+            .WaitingProxyWrite => {
+                sendToSocket(self.proxy_fd.?, self.request_buffer[0..@intCast(self.request_buffer_read_count)]);
+                event_loop.registerWithOption(self.proxy_fd.?, .Read, self.event_data, .{ .oneshot = true });
+                self.state = self.state.transition();
+            },
+            .WaitingProxyRead => {
+                self.proxy_response_buffer_read_count = readFromSocket(self.proxy_fd.?, &self.proxy_response_buffer);
+                self.state = self.state.transition();
+
+                sendToSocket(self.client_fd, self.proxy_response_buffer[0..@intCast(self.proxy_response_buffer_read_count)]);
+            },
+            else => |x| {
+                std.log.debug("Received {any}", .{x});
+                self.state = .Error;
+            },
+        }
+        if (self.state == .Complete or self.state == .Error) {
+            self.deinit();
+        }
     }
 };
 
@@ -82,6 +180,11 @@ const EventLoop = struct {
 
     const Interest = enum(comptime_int) {
         Read = std.c.EVFILT.READ,
+        Write = std.c.EVFILT.WRITE,
+    };
+
+    const Options = struct {
+        oneshot: bool = false,
     };
 
     const EventData = struct {
@@ -151,13 +254,18 @@ const EventLoop = struct {
         }
         return result;
     }
-
     pub fn register(self: *const EventLoop, where: i32, what: Interest, event_data: *EventData) void {
+        self.registerWithOption(where, what, event_data, .{});
+    }
+
+    pub fn registerWithOption(self: *const EventLoop, where: i32, what: Interest, event_data: *EventData, options: Options) void {
         const data = @intFromPtr(event_data);
+        var flags: u16 = std.c.EV.ADD;
+        flags |= if (options.oneshot) std.c.EV.ONESHOT else std.c.EV.ENABLE;
         const changelist: [1]Event = [_]Event{.{
             .ident = @intCast(where),
             .filter = @intFromEnum(what),
-            .flags = std.c.EV.ADD | std.c.EV.ENABLE,
+            .flags = flags,
             .fflags = 0,
             .data = 0,
             .udata = data,
@@ -186,7 +294,7 @@ fn connectToBackendProxy(addr: [4]u8, port: u16) i32 {
     };
     result = posix.errno(c.connect(proxy_fd, @ptrCast(&proxy_sock_addr_in), @sizeOf(@TypeOf(proxy_sock_addr_in))));
     if (result != .SUCCESS) {
-        // INPROGRESS needs to be handled
+        // @todo - INPROGRESS needs to be handled
         std.log.err("proxy connect call failed, {any}", .{result});
         std.process.exit(1);
     }

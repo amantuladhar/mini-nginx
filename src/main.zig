@@ -1,22 +1,51 @@
 pub fn main() !void {
     const gpa, const deinit = getAllocator();
     defer _ = if (deinit) debug_allocator.deinit();
+    std.log.info("Parent is alive!! {d}", .{c.getpid()});
 
     setupGracefulShutdown();
 
     const cli_args: CliArgs = try .parse();
-    var loop: EventLoop = .init();
 
     const server: [4]u8 = .{0} ** 4;
     const server_port: u16 = cli_args.port;
     const server_fd = setupMasterSocketListener(server, server_port);
     defer _ = c.close(server_fd);
 
-    const accept_event = AcceptConnectionEvent.init(gpa, server_fd);
-    defer accept_event.deinit();
-    loop.register(server_fd, .Read, accept_event.event_data);
+    for (0..5) |it| {
+        _ = it;
+        const pid = c.fork();
+        switch (pid) {
+            -1 => {
+                std.log.err("Fork failed: {any}", .{posix.errno(pid)});
+            },
+            0 => {
+                std.log.info("I(child) am alive!!! - {d}", .{c.getpid()});
+                GlobalState.setProcessType(.Child);
 
-    loop.run();
+                var child_loop = EventLoop.init();
+                defer child_loop.deinit();
+
+                const accept_event = AcceptConnectionEvent.init(gpa, server_fd);
+                defer accept_event.deinit();
+
+                child_loop.register(server_fd, .Read, accept_event.event_data);
+                child_loop.run();
+            },
+            else => {
+                std.log.info("child process started with PID: {d}", .{pid});
+            },
+        }
+    }
+    switch (GlobalState.processType()) {
+        .Parent => {
+            _ = c.waitpid(-1, null, 0);
+            std.log.info("All child process has been stopped", .{});
+        },
+        .Child => {
+            std.log.info("Child process exited: {d}", .{c.getpid()});
+        },
+    }
 
     // const client_fd = acceptClientConnection(server_fd);
     // defer _ = c.close(client_fd);
@@ -44,14 +73,26 @@ pub fn main() !void {
 }
 
 const GlobalState = struct {
-    // Hmm.. I kind of don't need to use atomic value has I won't have multiple threads
+    // Hmm.. I kind of don't need to use atomic value as I won't have multiple threads
     // I will fork child processes, and they will have their own copy of this variable.
     // But to be safe just in case, maybe atomic is fine
     var shutdown_requested = std.atomic.Value(bool).init(false);
+    var process_type = std.atomic.Value(u8).init(@intFromEnum(ProcessType.Parent));
+
+    const ProcessType = enum(u8) { Parent = 0, Child = 1 };
+
+    pub fn processType() ProcessType {
+        return @enumFromInt(GlobalState.process_type.load(.acquire));
+    }
+
+    pub fn setProcessType(pt: ProcessType) void {
+        GlobalState.process_type.store(@intFromEnum(pt), .release);
+    }
 
     pub fn requestShutdown() void {
         shutdown_requested.store(true, .release);
     }
+
     pub fn isShutdownRequested() bool {
         return shutdown_requested.load(.acquire);
     }

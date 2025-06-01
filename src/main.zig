@@ -2,6 +2,8 @@ pub fn main() !void {
     const gpa, const deinit = getAllocator();
     defer _ = if (deinit) debug_allocator.deinit();
 
+    setupGracefulShutdown();
+
     const cli_args: CliArgs = try .parse();
     var loop: EventLoop = .init();
 
@@ -421,6 +423,31 @@ fn getAllocator() struct { Allocator, bool } {
         .Debug, .ReleaseSafe => .{ debug_allocator.allocator(), true },
         .ReleaseFast, .ReleaseSmall => .{ debug_allocator.allocator(), true },
     };
+}
+
+fn gracefulShutdownHandler(sig: i32, info: *const posix.siginfo_t, ctx_ptr: ?*anyopaque) callconv(.c) noreturn {
+    _ = info;
+    _ = ctx_ptr;
+    std.log.info("Received signal {d}, shutting down gracefully...", .{sig});
+    std.process.exit(0);
+}
+
+fn setupGracefulShutdown() void {
+    var act = posix.Sigaction{
+        .handler = .{ .sigaction = gracefulShutdownHandler },
+        .mask = posix.empty_sigset,
+        .flags = (posix.SA.SIGINFO | posix.SA.RESTART | posix.SA.RESETHAND),
+    };
+    var result = c.sigaction(c.SIG.TERM, &act, null);
+    if (posix.errno(result) != .SUCCESS) {
+        std.log.err("sigaction call failed term: {any}", .{posix.errno(result)});
+        std.process.exit(1);
+    }
+    result = c.sigaction(c.SIG.INT, &act, null);
+    if (posix.errno(result) != .SUCCESS) {
+        std.log.err("sigaction call failed int: {any}", .{posix.errno(result)});
+        std.process.exit(1);
+    }
 }
 
 const std = @import("std");

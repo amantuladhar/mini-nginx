@@ -1,5 +1,5 @@
 pub fn main() !void {
-    const gpa, const deinit = getAllocator();
+    const allocator, const deinit = getAllocator();
     defer _ = if (deinit) debug_allocator.deinit();
     std.log.info("Parent is alive!! {d}", .{c.getpid()});
 
@@ -26,7 +26,7 @@ pub fn main() !void {
                 var child_loop = EventLoop.init();
                 defer child_loop.deinit();
 
-                const accept_event = AcceptConnectionEvent.init(gpa, server_fd);
+                const accept_event = AcceptConnectionEvent.init(allocator, server_fd);
                 defer accept_event.deinit();
 
                 child_loop.register(server_fd, .Read, accept_event.event_data);
@@ -72,339 +72,12 @@ pub fn main() !void {
     // sendToSocket(client_fd, proxy_resp);
 }
 
-const GlobalState = struct {
-    // Hmm.. I kind of don't need to use atomic value as I won't have multiple threads
-    // I will fork child processes, and they will have their own copy of this variable.
-    // But to be safe just in case, maybe atomic is fine
-    var shutdown_requested = std.atomic.Value(bool).init(false);
-    var process_type = std.atomic.Value(u8).init(@intFromEnum(ProcessType.Parent));
-
-    const ProcessType = enum(u8) { Parent = 0, Child = 1 };
-
-    pub fn processType() ProcessType {
-        return @enumFromInt(GlobalState.process_type.load(.acquire));
-    }
-
-    pub fn setProcessType(pt: ProcessType) void {
-        process_type.store(@intFromEnum(pt), .release);
-    }
-
-    pub fn requestShutdown() void {
-        shutdown_requested.store(true, .release);
-    }
-
-    pub fn isShutdownRequested() bool {
-        return shutdown_requested.load(.acquire);
-    }
-};
-
-const AcceptConnectionEvent = struct {
-    server_fd: i32,
-    event_data: *EventData,
-    allocator: Allocator,
-
-    const EventData = EventLoop.EventData;
-
-    pub fn init(allocator: Allocator, server_fd: i32) *AcceptConnectionEvent {
-        const self = allocator.create(AcceptConnectionEvent) catch unreachable;
-        const event_data = allocator.create(EventData) catch unreachable;
-
-        self.* = .{ .server_fd = server_fd, .event_data = event_data, .allocator = allocator };
-
-        event_data.* = .{
-            .ptr = self,
-            .vtable = &.{ .callback = AcceptConnectionEvent.callback },
-        };
-
-        return self;
-    }
-    pub fn deinit(self: *@This()) void {
-        self.allocator.destroy(self.event_data);
-        self.allocator.destroy(self);
-    }
-
-    pub fn callback(context: *anyopaque, event_loop: *EventLoop) void {
-        const self: *AcceptConnectionEvent = @ptrCast(@alignCast(context));
-        std.log.debug("AcceptConnectionEvent called", .{});
-
-        const client_fd = acceptClientConnection(self.server_fd);
-
-        // @todo - allocator maybe should be args to function
-        const proxy_work_event = ProxyWorkEvent.init(self.allocator, self.server_fd, client_fd);
-        event_loop.register(client_fd, .Read, proxy_work_event.event_data);
-    }
-};
-
 const HttpRequest = struct {
     method: []const u8,
     path: []const u8,
     headers: std.StringHashMap([]const u8),
     body: []const u8,
 };
-
-const ProxyWorkEvent = struct {
-    server_fd: i32,
-    client_fd: i32,
-    proxy_fd: ?i32 = null,
-    state: State = .WaitingClientRead,
-    event_data: *EventData,
-    // @todo - proper http reader/writer
-    request_buffer: [4096]u8 = .{0} ** 4096,
-    request_buffer_read_count: isize = 0,
-    proxy_response_buffer: [4096]u8 = .{0} ** 4096,
-    proxy_response_buffer_read_count: isize = 0,
-    allocator: Allocator,
-
-    const EventData = EventLoop.EventData;
-    const Self = @This();
-
-    const State = enum {
-        WaitingClientRead,
-        WaitingProxyWrite,
-        WaitingProxyRead,
-        Complete,
-        Error,
-
-        pub fn transition(self: State) State {
-            return switch (self) {
-                .WaitingClientRead => .WaitingProxyWrite,
-                .WaitingProxyWrite => .WaitingProxyRead,
-                .WaitingProxyRead => .Complete,
-                else => .Error,
-            };
-        }
-    };
-
-    pub fn init(allocator: Allocator, server_fd: i32, client_fd: i32) *Self {
-        const self = allocator.create(Self) catch unreachable;
-        const event_data = allocator.create(EventData) catch unreachable;
-
-        self.* = .{
-            .event_data = event_data,
-            .allocator = allocator,
-
-            .server_fd = server_fd,
-            .client_fd = client_fd,
-        };
-
-        event_data.* = .{
-            .ptr = self,
-            .vtable = &.{ .callback = @This().callback },
-        };
-
-        return self;
-    }
-
-    pub fn deinit(self: *@This()) void {
-        if (self.proxy_fd) |fd| {
-            _ = c.close(fd);
-        }
-        _ = c.close(self.client_fd);
-        self.allocator.destroy(self.event_data);
-        self.allocator.destroy(self);
-    }
-
-    pub fn callback(context: *anyopaque, event_loop: *EventLoop) void {
-        const self: *@This() = @ptrCast(@alignCast(context));
-        std.log.debug("ProxyWorkEvent:: callback", .{});
-
-        switch (self.state) {
-            .WaitingClientRead => {
-                self.request_buffer_read_count = readFromSocket(self.client_fd, &self.request_buffer);
-                self.proxy_fd = connectToBackendProxy(.{ 127, 0, 0, 1 }, 9999);
-                event_loop.registerWithOption(self.proxy_fd.?, .Write, self.event_data, .{ .oneshot = true });
-                self.state = self.state.transition();
-            },
-            .WaitingProxyWrite => {
-                sendToSocket(self.proxy_fd.?, self.request_buffer[0..@intCast(self.request_buffer_read_count)]);
-                event_loop.registerWithOption(self.proxy_fd.?, .Read, self.event_data, .{ .oneshot = true });
-                self.state = self.state.transition();
-            },
-            .WaitingProxyRead => {
-                self.proxy_response_buffer_read_count = readFromSocket(self.proxy_fd.?, &self.proxy_response_buffer);
-                self.state = self.state.transition();
-
-                sendToSocket(self.client_fd, self.proxy_response_buffer[0..@intCast(self.proxy_response_buffer_read_count)]);
-            },
-            else => |x| {
-                std.log.debug("Received {any}", .{x});
-                self.state = .Error;
-            },
-        }
-        if (self.state == .Complete or self.state == .Error) {
-            self.deinit();
-        }
-    }
-};
-
-const EventLoop = struct {
-    queue_fd: i32,
-
-    const Event = switch (builtin.os.tag) {
-        .macos => c.kevent64_s,
-        else => @compileError("Unsupported OS: " ++ @tagName(builtin.os.tag)),
-    };
-
-    const Interest = enum(comptime_int) {
-        Read = std.c.EVFILT.READ,
-        Write = std.c.EVFILT.WRITE,
-    };
-
-    const Options = struct {
-        oneshot: bool = false,
-    };
-
-    const EventData = struct {
-        ptr: *anyopaque,
-        vtable: *const VTable,
-
-        const VTable = struct {
-            callback: *const fn (self: *anyopaque, event_loop: *EventLoop) void,
-        };
-
-        pub fn callback(self: *EventData, event_loop: *EventLoop) void {
-            self.vtable.callback(self.ptr, event_loop);
-        }
-    };
-
-    pub fn init() EventLoop {
-        const queue_fd = c.kqueue();
-        if (posix.errno(queue_fd) != .SUCCESS) {
-            std.log.err("kqueue call failed: {any}", .{posix.errno(queue_fd)});
-            GlobalState.requestShutdown();
-        }
-        return .{ .queue_fd = queue_fd };
-    }
-
-    pub fn deinit(self: *EventLoop) void {
-        _ = c.close(self.queue_fd);
-    }
-
-    pub fn run(self: *EventLoop) void {
-        std.log.info("running event loop...", .{});
-        var events: [10]Event = undefined;
-        while (!GlobalState.isShutdownRequested()) {
-            const nev = poll(self.queue_fd, &events);
-            const result = posix.errno(nev);
-            if (result != .SUCCESS) {
-                if (result != .INTR) {
-                    std.log.err("kevent call failed: {any}", .{posix.errno(nev)});
-                    GlobalState.requestShutdown();
-                }
-                continue;
-            }
-            std.log.info("received {d} events", .{nev});
-            for (events[0..@intCast(nev)]) |event| {
-                const edata = parseEventData(&event);
-                edata.callback(self);
-            }
-        }
-    }
-
-    fn parseEventData(event: *const Event) *EventData {
-        const edata: *EventData = switch (builtin.os.tag) {
-            .macos => @ptrFromInt(event.udata),
-            else => @compileError("Unsupported OS: " ++ @tagName(builtin.os.tag)),
-        };
-        return edata;
-    }
-
-    fn poll(queuefd: i32, events: []Event) i32 {
-        var changelists: [0]Event = undefined;
-        const result = switch (builtin.os.tag) {
-            .macos => c.kevent64(
-                queuefd,
-                changelists[0..0].ptr,
-                0,
-                events[0..events.len].ptr,
-                @intCast(events.len),
-                0,
-                null,
-            ),
-            else => @compileError("Unsupported OS: " ++ @tagName(builtin.os.tag)),
-        };
-        return result;
-    }
-    pub fn register(self: *const EventLoop, where: i32, what: Interest, event_data: *EventData) void {
-        self.registerWithOption(where, what, event_data, .{});
-    }
-
-    pub fn registerWithOption(self: *const EventLoop, where: i32, what: Interest, event_data: *EventData, options: Options) void {
-        const data = @intFromPtr(event_data);
-        var flags: u16 = std.c.EV.ADD;
-        flags |= if (options.oneshot) std.c.EV.ONESHOT else std.c.EV.ENABLE;
-        const changelist: [1]Event = [_]Event{.{
-            .ident = @intCast(where),
-            .filter = @intFromEnum(what),
-            .flags = flags,
-            .fflags = 0,
-            .data = 0,
-            .udata = data,
-            .ext = .{0} ** 2,
-        }};
-        var events: [0]Event = undefined;
-        const result = c.kevent64(self.queue_fd, changelist[0..1].ptr, 1, events[0..0], 0, 0, null);
-        if (posix.errno(result) != .SUCCESS) {
-            std.log.err("kevent call failed: {any}", .{posix.errno(result)});
-            GlobalState.requestShutdown();
-        }
-    }
-};
-
-fn connectToBackendProxy(addr: [4]u8, port: u16) i32 {
-    const proxy_fd = c.socket(posix.AF.INET, posix.SOCK.STREAM, 0);
-    var result = posix.errno(proxy_fd);
-    if (result != .SUCCESS) {
-        std.log.err("proxy socket call failed, {any}", .{result});
-        GlobalState.requestShutdown();
-    }
-    const proxy_sock_addr_in: posix.sockaddr.in = .{
-        .family = posix.AF.INET,
-        .addr = @as(*align(1) const u32, @ptrCast(&addr)).*,
-        .port = std.mem.nativeToBig(u16, port),
-    };
-    result = posix.errno(c.connect(proxy_fd, @ptrCast(&proxy_sock_addr_in), @sizeOf(@TypeOf(proxy_sock_addr_in))));
-    if (result != .SUCCESS) {
-        // @todo - INPROGRESS needs to be handled
-        std.log.err("proxy connect call failed, {any}", .{result});
-        GlobalState.requestShutdown();
-    }
-    return proxy_fd;
-}
-
-fn sendToSocket(socket: i32, bytes: []const u8) void {
-    // var result = posix.errno(c.send(socket, buffer[0..@intCast(read_count)].ptr, @intCast(read_count), 0));
-    const result = posix.errno(c.send(socket, bytes[0..bytes.len].ptr, bytes.len, 0));
-    if (result != .SUCCESS) {
-        std.log.err("proxy send call failed, {any}", .{result});
-        GlobalState.requestShutdown();
-    }
-}
-
-fn readFromSocket(socket: i32, buffer: []u8) isize {
-    const read_count = c.read(socket, buffer[0..buffer.len].ptr, buffer.len);
-    const result = posix.errno(read_count);
-    if (result != .SUCCESS) {
-        std.log.err("call to read failed: {any}", .{result});
-        GlobalState.requestShutdown();
-    }
-    return read_count;
-}
-
-fn acceptClientConnection(server_fd: i32) i32 {
-    var client_addr: posix.sockaddr.in = undefined;
-    var client_addr_len: posix.socklen_t = @sizeOf(@TypeOf(client_addr));
-
-    const client_fd = c.accept(server_fd, @ptrCast(&client_addr), &client_addr_len);
-
-    const result = posix.errno(client_fd);
-    if (result != .SUCCESS) {
-        std.log.err("call to accept failed: {any}", .{result});
-        GlobalState.requestShutdown();
-    }
-    std.log.info("Connection from client accepted: {any}", .{client_addr});
-    return client_fd;
-}
 
 fn setupMasterSocketListener(server: [4]u8, port: u16) i32 {
     const server_fd = c.socket(posix.AF.INET, posix.SOCK.STREAM, 0);
@@ -455,38 +128,6 @@ fn setupMasterSocketListener(server: [4]u8, port: u16) i32 {
     return server_fd;
 }
 
-const CliArgs = struct {
-    port: u16 = 8080,
-    msg: []const u8 = "[server 1]",
-    proxy_port: ?u16 = null,
-
-    pub fn parse() !CliArgs {
-        var args = std.process.args();
-        _ = args.next();
-
-        var cli_args: CliArgs = .{};
-
-        while (args.next()) |arg| {
-            if (std.mem.eql(u8, "--port", arg)) {
-                const port = args.next() orelse unreachable;
-                cli_args.port = try std.fmt.parseInt(u16, port, 10);
-                continue;
-            }
-            if (std.mem.eql(u8, "--msg", arg)) {
-                const msg = args.next() orelse unreachable;
-                cli_args.msg = msg;
-                continue;
-            }
-            if (std.mem.eql(u8, "--proxy-port", arg)) {
-                const proxy_port = args.next() orelse unreachable;
-                cli_args.proxy_port = try std.fmt.parseInt(u16, proxy_port, 10);
-                continue;
-            }
-        }
-        return cli_args;
-    }
-};
-
 fn getAllocator() struct { Allocator, bool } {
     return switch (builtin.mode) {
         .Debug, .ReleaseSafe => .{ debug_allocator.allocator(), true },
@@ -521,6 +162,10 @@ fn setupGracefulShutdown() void {
 
 const std = @import("std");
 const builtin = @import("builtin");
+const GlobalState = @import("GlobalState.zig");
+const CliArgs = @import("CliArgs.zig");
+const EventLoop = @import("EventLoop.zig");
+const AcceptConnectionEvent = @import("AcceptConnectionEvent.zig");
 const c = std.c;
 const posix = std.posix;
 const Allocator = std.mem.Allocator;

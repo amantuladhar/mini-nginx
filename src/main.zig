@@ -41,6 +41,21 @@ pub fn main() !void {
 
     // sendToSocket(client_fd, proxy_resp);
 }
+
+const GlobalState = struct {
+    // Hmm.. I kind of don't need to use atomic value has I won't have multiple threads
+    // I will fork child processes, and they will have their own copy of this variable.
+    // But to be safe just in case, maybe atomic is fine
+    var shutdown_requested = std.atomic.Value(bool).init(false);
+
+    pub fn requestShutdown() void {
+        shutdown_requested.store(true, .release);
+    }
+    pub fn isShutdownRequested() bool {
+        return shutdown_requested.load(.acquire);
+    }
+};
+
 const AcceptConnectionEvent = struct {
     server_fd: i32,
     event_data: *EventData,
@@ -84,6 +99,7 @@ const ProxyWorkEvent = struct {
     proxy_fd: ?i32 = null,
     state: State = .WaitingClientRead,
     event_data: *EventData,
+    // @todo - proper http reader/writer
     request_buffer: [4096]u8 = .{0} ** 4096,
     request_buffer_read_count: isize = 0,
     proxy_response_buffer: [4096]u8 = .{0} ** 4096,
@@ -206,7 +222,7 @@ const EventLoop = struct {
         const queue_fd = c.kqueue();
         if (posix.errno(queue_fd) != .SUCCESS) {
             std.log.err("kqueue call failed: {any}", .{posix.errno(queue_fd)});
-            std.process.exit(1);
+            GlobalState.requestShutdown();
         }
         return .{ .queue_fd = queue_fd };
     }
@@ -218,8 +234,13 @@ const EventLoop = struct {
     pub fn run(self: *EventLoop) void {
         std.log.info("running event loop...", .{});
         var events: [10]Event = undefined;
-        while (true) {
+        while (!GlobalState.isShutdownRequested()) {
             const nev = poll(self.queue_fd, &events);
+            if (posix.errno(nev) != .SUCCESS) {
+                std.log.err("kevent call failed: {any}", .{posix.errno(nev)});
+                GlobalState.requestShutdown();
+                continue;
+            }
             std.log.info("received {d} events", .{nev});
             for (events[0..@intCast(nev)]) |event| {
                 const edata = parseEventData(&event);
@@ -252,7 +273,7 @@ const EventLoop = struct {
         };
         if (posix.errno(result) != .SUCCESS) {
             std.log.err("kevent call failed: {any}", .{posix.errno(result)});
-            std.process.exit(1);
+            GlobalState.requestShutdown();
         }
         return result;
     }
@@ -277,7 +298,7 @@ const EventLoop = struct {
         const result = c.kevent64(self.queue_fd, changelist[0..1].ptr, 1, events[0..0], 0, 0, null);
         if (posix.errno(result) != .SUCCESS) {
             std.log.err("kevent call failed: {any}", .{posix.errno(result)});
-            std.process.exit(1);
+            GlobalState.requestShutdown();
         }
     }
 };
@@ -287,7 +308,7 @@ fn connectToBackendProxy(addr: [4]u8, port: u16) i32 {
     var result = posix.errno(proxy_fd);
     if (result != .SUCCESS) {
         std.log.err("proxy socket call failed, {any}", .{result});
-        std.process.exit(1);
+        GlobalState.requestShutdown();
     }
     const proxy_sock_addr_in: posix.sockaddr.in = .{
         .family = posix.AF.INET,
@@ -298,7 +319,7 @@ fn connectToBackendProxy(addr: [4]u8, port: u16) i32 {
     if (result != .SUCCESS) {
         // @todo - INPROGRESS needs to be handled
         std.log.err("proxy connect call failed, {any}", .{result});
-        std.process.exit(1);
+        GlobalState.requestShutdown();
     }
     return proxy_fd;
 }
@@ -308,7 +329,7 @@ fn sendToSocket(socket: i32, bytes: []const u8) void {
     const result = posix.errno(c.send(socket, bytes[0..bytes.len].ptr, bytes.len, 0));
     if (result != .SUCCESS) {
         std.log.err("proxy send call failed, {any}", .{result});
-        std.process.exit(1);
+        GlobalState.requestShutdown();
     }
 }
 
@@ -317,7 +338,7 @@ fn readFromSocket(socket: i32, buffer: []u8) isize {
     const result = posix.errno(read_count);
     if (result != .SUCCESS) {
         std.log.err("call to read failed: {any}", .{result});
-        std.process.exit(1);
+        GlobalState.requestShutdown();
     }
     return read_count;
 }
@@ -331,7 +352,7 @@ fn acceptClientConnection(server_fd: i32) i32 {
     const result = posix.errno(client_fd);
     if (result != .SUCCESS) {
         std.log.err("call to accept failed: {any}", .{result});
-        std.process.exit(1);
+        GlobalState.requestShutdown();
     }
     std.log.info("Connection from client accepted: {any}", .{client_addr});
     return client_fd;
@@ -342,13 +363,13 @@ fn setupMasterSocketListener(server: [4]u8, port: u16) i32 {
     var result = posix.errno(server_fd);
     if (result != .SUCCESS) {
         std.log.err("Call to socket failed: {any}", .{result});
-        std.process.exit(1);
+        GlobalState.requestShutdown();
     }
 
     result = posix.errno(c.setsockopt(server_fd, posix.SOL.SOCKET, posix.SO.REUSEADDR, &@as(u32, 1), @sizeOf(u32)));
     if (result != .SUCCESS) {
         std.log.err("call to setsockopt failed: {any}", .{result});
-        std.process.exit(1);
+        GlobalState.requestShutdown();
     }
     const sock_addr_in: posix.sockaddr.in = .{
         .family = posix.AF.INET,
@@ -359,26 +380,26 @@ fn setupMasterSocketListener(server: [4]u8, port: u16) i32 {
     result = posix.errno(c.bind(server_fd, @ptrCast(&sock_addr_in), @sizeOf(@TypeOf(sock_addr_in))));
     if (result != .SUCCESS) {
         std.log.err("call to bind failed: {any}", .{result});
-        std.process.exit(1);
+        GlobalState.requestShutdown();
     }
 
     result = posix.errno(c.listen(server_fd, 1));
     if (result != .SUCCESS) {
         std.log.err("call to listen failed: {any}", .{result});
-        std.process.exit(1);
+        GlobalState.requestShutdown();
     }
 
     const existing_flag = c.fcntl(server_fd, posix.F.GETFL, @as(u32, 0));
     result = posix.errno(existing_flag);
     if (result != .SUCCESS) {
         std.log.err("call to fcntl failed: {any}", .{result});
-        std.process.exit(1);
+        GlobalState.requestShutdown();
     }
 
     result = posix.errno(c.fcntl(server_fd, posix.F.SETFL, @as(usize, @intCast(existing_flag)) | posix.SOCK.NONBLOCK));
     if (result != .SUCCESS) {
         std.log.err("call to fcntl failed: {any}", .{result});
-        std.process.exit(1);
+        GlobalState.requestShutdown();
     }
 
     std.log.info("Waiting for client connection:\nport: {d}", .{port});
@@ -425,11 +446,11 @@ fn getAllocator() struct { Allocator, bool } {
     };
 }
 
-fn gracefulShutdownHandler(sig: i32, info: *const posix.siginfo_t, ctx_ptr: ?*anyopaque) callconv(.c) noreturn {
+fn gracefulShutdownHandler(sig: i32, info: *const posix.siginfo_t, ctx_ptr: ?*anyopaque) callconv(.c) void {
     _ = info;
     _ = ctx_ptr;
     std.log.info("Received signal {d}, shutting down gracefully...", .{sig});
-    std.process.exit(0);
+    GlobalState.requestShutdown();
 }
 
 fn setupGracefulShutdown() void {
@@ -441,12 +462,12 @@ fn setupGracefulShutdown() void {
     var result = c.sigaction(c.SIG.TERM, &act, null);
     if (posix.errno(result) != .SUCCESS) {
         std.log.err("sigaction call failed term: {any}", .{posix.errno(result)});
-        std.process.exit(1);
+        GlobalState.requestShutdown();
     }
     result = c.sigaction(c.SIG.INT, &act, null);
     if (posix.errno(result) != .SUCCESS) {
         std.log.err("sigaction call failed int: {any}", .{posix.errno(result)});
-        std.process.exit(1);
+        GlobalState.requestShutdown();
     }
 }
 

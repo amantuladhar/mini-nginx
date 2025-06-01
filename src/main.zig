@@ -1,42 +1,9 @@
-const AcceptConnectionEvent = struct {
-    const EventData = EventLoop.EventData;
-
-    server_fd: i32,
-    event_data: *EventData,
-    allocator: Allocator,
-
-    pub fn init(allocator: Allocator, server_fd: i32) *AcceptConnectionEvent {
-        const self = allocator.create(AcceptConnectionEvent) catch unreachable;
-        const event_data = self.allocator.create(EventData) catch unreachable;
-
-        self.* = .{ .server_fd = server_fd, .event_data = event_data, .allocator = allocator };
-
-        event_data.* = .{
-            .ptr = self,
-            .vtable = &.{ .callback = AcceptConnectionEvent.callback },
-        };
-
-        return self;
-    }
-    pub fn deinit(self: *@This()) void {
-        self.allocator.destroy(self.event_data);
-        self.destroy(self);
-    }
-
-    pub fn callback(context: *anyopaque, event_loop: *EventLoop) void {
-        const self: @This() = @ptrCast(@alignCast(context));
-        _ = self;
-        _ = event_loop;
-        std.log.debug("AcceptConnectionEvent called", .{});
-    }
-};
-
 pub fn main() !void {
     const gpa, const deinit = getAllocator();
     defer _ = if (deinit) debug_allocator.deinit();
 
     const cli_args: CliArgs = try .parse();
-    const loop: EventLoop = .init();
+    var loop: EventLoop = .init();
 
     const server: [4]u8 = .{0} ** 4;
     const server_port: u16 = cli_args.port;
@@ -45,6 +12,8 @@ pub fn main() !void {
 
     const accept_event = AcceptConnectionEvent.init(gpa, server_fd);
     loop.register(server_fd, .Read, accept_event.event_data);
+
+    loop.run();
 
     // const client_fd = acceptClientConnection(server_fd);
     // defer _ = c.close(client_fd);
@@ -70,11 +39,44 @@ pub fn main() !void {
 
     // sendToSocket(client_fd, proxy_resp);
 }
+const AcceptConnectionEvent = struct {
+    const EventData = EventLoop.EventData;
+
+    server_fd: i32,
+    event_data: *EventData,
+    allocator: Allocator,
+
+    pub fn init(allocator: Allocator, server_fd: i32) *AcceptConnectionEvent {
+        const self = allocator.create(AcceptConnectionEvent) catch unreachable;
+        const event_data = allocator.create(EventData) catch unreachable;
+
+        self.* = .{ .server_fd = server_fd, .event_data = event_data, .allocator = allocator };
+
+        event_data.* = .{
+            .ptr = self,
+            .vtable = &.{ .callback = AcceptConnectionEvent.callback },
+        };
+
+        return self;
+    }
+    pub fn deinit(self: *@This()) void {
+        self.allocator.destroy(self.event_data);
+        self.destroy(self);
+    }
+
+    pub fn callback(context: *anyopaque, event_loop: *EventLoop) void {
+        const self: *AcceptConnectionEvent = @ptrCast(@alignCast(context));
+        _ = self;
+        _ = event_loop;
+        std.log.debug("AcceptConnectionEvent called", .{});
+    }
+};
+
 const EventLoop = struct {
     queue_fd: i32,
 
     const Event = switch (builtin.os.tag) {
-        .macos => posix.Kevent,
+        .macos => c.kevent64_s,
         else => @compileError("Unsupported OS: " ++ @tagName(builtin.os.tag)),
     };
 
@@ -87,7 +89,7 @@ const EventLoop = struct {
         vtable: *const VTable,
 
         const VTable = struct {
-            callback: fn (self: *anyopaque, event_loop: *EventLoop) void,
+            callback: *const fn (self: *anyopaque, event_loop: *EventLoop) void,
         };
 
         pub fn callback(self: *EventData, event_loop: *EventLoop) void {
@@ -97,8 +99,8 @@ const EventLoop = struct {
 
     pub fn init() EventLoop {
         const queue_fd = c.kqueue();
-        if (posix.errno() != .SUCCESS) {
-            std.log.err("kqueue call failed: {any}", .{posix.errno()});
+        if (posix.errno(queue_fd) != .SUCCESS) {
+            std.log.err("kqueue call failed: {any}", .{posix.errno(queue_fd)});
             std.process.exit(1);
         }
         return .{ .queue_fd = queue_fd };
@@ -106,6 +108,48 @@ const EventLoop = struct {
 
     pub fn deinit(self: *EventLoop) void {
         _ = c.close(self.queue_fd);
+    }
+
+    pub fn run(self: *EventLoop) void {
+        std.log.info("running event loop...", .{});
+        var events: [10]Event = undefined;
+        while (true) {
+            const nev = poll(self.queue_fd, &events);
+            std.log.info("received {d} events", .{nev});
+            for (events[0..@intCast(nev)]) |event| {
+                const edata = parseEventData(&event);
+                edata.callback(self);
+            }
+        }
+    }
+
+    fn parseEventData(event: *const Event) *EventData {
+        const edata: *EventData = switch (builtin.os.tag) {
+            .macos => @ptrFromInt(event.udata),
+            else => @compileError("Unsupported OS: " ++ @tagName(builtin.os.tag)),
+        };
+        return edata;
+    }
+
+    fn poll(queuefd: i32, events: []Event) i32 {
+        var changelists: [0]Event = undefined;
+        const result = switch (builtin.os.tag) {
+            .macos => c.kevent64(
+                queuefd,
+                changelists[0..0].ptr,
+                0,
+                events[0..events.len].ptr,
+                @intCast(events.len),
+                0,
+                null,
+            ),
+            else => @compileError("Unsupported OS: " ++ @tagName(builtin.os.tag)),
+        };
+        if (posix.errno(result) != .SUCCESS) {
+            std.log.err("kevent call failed: {any}", .{posix.errno(result)});
+            std.process.exit(1);
+        }
+        return result;
     }
 
     pub fn register(self: *const EventLoop, where: i32, what: Interest, event_data: *EventData) void {
@@ -117,11 +161,12 @@ const EventLoop = struct {
             .fflags = 0,
             .data = 0,
             .udata = data,
+            .ext = .{0} ** 2,
         }};
         var events: [0]Event = undefined;
-        const result = c.kevent64(self.queue_fd, changelist[0..1].ptr, 1, events[0..0], 0, null);
+        const result = c.kevent64(self.queue_fd, changelist[0..1].ptr, 1, events[0..0], 0, 0, null);
         if (posix.errno(result) != .SUCCESS) {
-            std.log.err("kevent call failed: {any}", .{posix.errno()});
+            std.log.err("kevent call failed: {any}", .{posix.errno(result)});
             std.process.exit(1);
         }
     }

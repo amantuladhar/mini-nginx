@@ -107,9 +107,9 @@ fn connectToBackendProxy(addr: [4]u8, port: u16) i32 {
 }
 
 const std = @import("std");
-const EventLoop = @import("EventLoop.zig");
-const GlobalState = @import("GlobalState.zig");
-const utils = @import("utils.zig");
+const EventLoop = @import("../EventLoop.zig");
+const GlobalState = @import("../GlobalState.zig");
+const utils = @import("../utils.zig");
 const c = std.c;
 const posix = std.posix;
 const Allocator = std.mem.Allocator;

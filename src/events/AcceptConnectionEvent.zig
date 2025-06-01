@@ -51,8 +51,8 @@ fn acceptClientConnection(server_fd: i32) i32 {
 }
 
 const std = @import("std");
-const EventLoop = @import("EventLoop.zig");
-const GlobalState = @import("GlobalState.zig");
+const EventLoop = @import("../EventLoop.zig");
+const GlobalState = @import("../GlobalState.zig");
 const ProxyWorkEvent = @import("ProxyWorkEvent.zig");
 const c = std.c;
 const posix = std.posix;

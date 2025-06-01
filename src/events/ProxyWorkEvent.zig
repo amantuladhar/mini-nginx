@@ -54,11 +54,88 @@ fn typeErasedCallback(context: *anyopaque, event_loop: *EventLoop) void {
     self.work(event_loop);
 }
 
+const SocketReader = struct {
+    fd: i32,
+    cursor: usize = 0,
+    exhausted: bool = false,
+    buffer: ArrayList,
+
+    pub fn readUntil(self: *@This(), delimiter: u8) []u8 {
+        if (self.readUntilWithinBuffer(delimiter)) |slice| return slice;
+
+        var chunk: [100]u8 = undefined;
+        while (!self.exhausted) {
+            const read_count = utils.readFromSocket(self.fd, &chunk);
+            if (read_count <= 0) {
+                self.exhausted = true;
+                break;
+            }
+            self.buffer.appendAll(chunk[0..@intCast(read_count)]);
+            if (read_count < chunk.len) self.exhausted = true;
+        }
+
+        if (self.readUntilWithinBuffer(delimiter)) |slice| return slice;
+
+        return self.buffer.items[self.cursor..];
+    }
+
+    fn readUntilWithinBuffer(self: *@This(), delimiter: u8) ?[]u8 {
+        for (self.buffer.items[self.cursor..], 0..) |it, index| {
+            if (it == delimiter) {
+                const slice = self.buffer.items[self.cursor .. self.cursor + index];
+                self.cursor += index + 1;
+                return slice;
+            }
+        }
+        return null;
+    }
+};
+
+const HttpRequest = struct {
+    method: []const u8,
+    path: []const u8,
+    headers: std.StringHashMap([]const u8),
+    body: []const u8,
+
+    raw: ArrayList,
+
+    pub fn readFromSocket(allocator: Allocator, fd: i32) HttpRequest {
+        const buffer = ArrayList.init(allocator);
+        var reader = SocketReader{ .fd = fd, .buffer = buffer };
+
+        const status_line = parseStatusLine(&reader);
+        const headers = parseHeaders(&reader);
+        _ = headers;
+
+        std.log.debug("Method: {s}\nPath:{s}", .{ status_line.method, status_line.path });
+        unreachable;
+    }
+
+    fn parseHeaders(reader: *SocketReader) void {
+        _ = reader;
+    }
+
+    fn parseStatusLine(reader: *SocketReader) struct { method: []const u8, path: []const u8 } {
+        const line = reader.readUntil('\n');
+        var parts = std.mem.splitAny(u8, line, " ");
+        const method = parts.next().?;
+        const path = parts.next().?;
+        return .{ .method = method, .path = path };
+    }
+};
+
 pub fn work(self: *Self, event_loop: *EventLoop) void {
     std.log.debug("ProxyWorkEvent:: callback", .{});
 
     switch (self.state) {
         .WaitingClientRead => {
+            // mark
+
+            const request = HttpRequest.readFromSocket(self.allocator, self.client_fd);
+            _ = request;
+
+            // mark
+
             self.request_buffer_read_count = utils.readFromSocket(self.client_fd, &self.request_buffer);
             self.proxy_fd = connectToBackendProxy(.{ 127, 0, 0, 1 }, 9999);
             event_loop.registerWithOption(self.proxy_fd.?, .Write, self.event_data, .{ .oneshot = true });
@@ -110,6 +187,7 @@ const std = @import("std");
 const EventLoop = @import("../EventLoop.zig");
 const GlobalState = @import("../GlobalState.zig");
 const utils = @import("../utils.zig");
+const ArrayList = @import("../ArrayList.zig");
 const c = std.c;
 const posix = std.posix;
 const Allocator = std.mem.Allocator;

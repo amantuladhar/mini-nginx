@@ -46,30 +46,6 @@ pub fn main() !void {
             std.log.info("Child process exited: {d}", .{c.getpid()});
         },
     }
-
-    // const client_fd = acceptClientConnection(server_fd);
-    // defer _ = c.close(client_fd);
-
-    // const BUFFER_SIZE = 4096;
-    // var buffer: [BUFFER_SIZE]u8 = .{0} ** BUFFER_SIZE;
-    // const read_count = readFromSocket(client_fd, &buffer);
-
-    // // proxy if proxy port is set
-    // const proxy_resp = blk: {
-    //     if (cli_args.proxy_port) |proxy_port| {
-    //         const proxy_addr: [4]u8 = .{ 127, 0, 0, 1 };
-    //         const proxy_fd = connectToBackendProxy(proxy_addr, proxy_port);
-    //         defer _ = c.close(proxy_fd);
-    //         sendToSocket(proxy_fd, buffer[0..@intCast(read_count)]);
-
-    //         var proxy_buffer: [BUFFER_SIZE]u8 = .{0} ** BUFFER_SIZE;
-    //         const proxy_read_count = readFromSocket(proxy_fd, &proxy_buffer);
-    //         break :blk proxy_buffer[0..@intCast(proxy_read_count)];
-    //     }
-    //     break :blk "";
-    // };
-
-    // sendToSocket(client_fd, proxy_resp);
 }
 
 const HttpRequest = struct {

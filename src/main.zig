@@ -13,6 +13,7 @@ pub fn main() !void {
     defer _ = c.close(server_fd);
 
     const accept_event = AcceptConnectionEvent.init(gpa, server_fd);
+    defer accept_event.deinit();
     loop.register(server_fd, .Read, accept_event.event_data);
 
     loop.run();
@@ -236,9 +237,12 @@ const EventLoop = struct {
         var events: [10]Event = undefined;
         while (!GlobalState.isShutdownRequested()) {
             const nev = poll(self.queue_fd, &events);
-            if (posix.errno(nev) != .SUCCESS) {
-                std.log.err("kevent call failed: {any}", .{posix.errno(nev)});
-                GlobalState.requestShutdown();
+            const result = posix.errno(nev);
+            if (result != .SUCCESS) {
+                if (result != .INTR) {
+                    std.log.err("kevent call failed: {any}", .{posix.errno(nev)});
+                    GlobalState.requestShutdown();
+                }
                 continue;
             }
             std.log.info("received {d} events", .{nev});
@@ -271,10 +275,6 @@ const EventLoop = struct {
             ),
             else => @compileError("Unsupported OS: " ++ @tagName(builtin.os.tag)),
         };
-        if (posix.errno(result) != .SUCCESS) {
-            std.log.err("kevent call failed: {any}", .{posix.errno(result)});
-            GlobalState.requestShutdown();
-        }
         return result;
     }
     pub fn register(self: *const EventLoop, where: i32, what: Interest, event_data: *EventData) void {

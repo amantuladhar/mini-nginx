@@ -5,7 +5,7 @@ pub fn main() !void {
 
     setupGracefulShutdown();
 
-    const cli_args: CliArgs = try .parse();
+    const cli_args = try CliArgs.parse();
 
     const server: [4]u8 = .{0} ** 4;
     const server_port: u16 = cli_args.port;
@@ -86,7 +86,7 @@ const GlobalState = struct {
     }
 
     pub fn setProcessType(pt: ProcessType) void {
-        GlobalState.process_type.store(@intFromEnum(pt), .release);
+        process_type.store(@intFromEnum(pt), .release);
     }
 
     pub fn requestShutdown() void {
@@ -135,6 +135,13 @@ const AcceptConnectionEvent = struct {
     }
 };
 
+const HttpRequest = struct {
+    method: []const u8,
+    path: []const u8,
+    headers: std.StringHashMap([]const u8),
+    body: []const u8,
+};
+
 const ProxyWorkEvent = struct {
     server_fd: i32,
     client_fd: i32,
@@ -163,7 +170,7 @@ const ProxyWorkEvent = struct {
                 .WaitingClientRead => .WaitingProxyWrite,
                 .WaitingProxyWrite => .WaitingProxyRead,
                 .WaitingProxyRead => .Complete,
-                else => unreachable,
+                else => .Error,
             };
         }
     };

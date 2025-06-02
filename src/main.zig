@@ -12,31 +12,31 @@ pub fn main() !void {
     const server_fd = setupMasterSocketListener(server, server_port);
     defer _ = c.close(server_fd);
 
-    for (0..5) |it| {
-        _ = it;
-        const pid = c.fork();
-        switch (pid) {
-            -1 => {
-                std.log.err("Fork failed: {any}", .{posix.errno(pid)});
-            },
-            0 => {
-                std.log.info("I(child) am alive!!! - {d}", .{c.getpid()});
-                GlobalState.setProcessType(.Child);
+    // for (0..5) |it| {
+    //     _ = it;
+    //     const pid = c.fork();
+    //     switch (pid) {
+    //         -1 => {
+    //             std.log.err("Fork failed: {any}", .{posix.errno(pid)});
+    //         },
+    //         0 => {
+    //             std.log.info("I(child) am alive!!! - {d}", .{c.getpid()});
+    //             GlobalState.setProcessType(.Child);
 
-                var child_loop = EventLoop.init();
-                defer child_loop.deinit();
+    var child_loop = EventLoop.init();
+    defer child_loop.deinit();
 
-                const accept_event = AcceptConnectionEvent.init(allocator, server_fd);
-                defer accept_event.deinit();
+    const accept_event = AcceptConnectionEvent.init(allocator, server_fd);
+    defer accept_event.deinit();
 
-                child_loop.register(server_fd, .Read, accept_event.event_data);
-                child_loop.run();
-            },
-            else => {
-                std.log.info("child process started with PID: {d}", .{pid});
-            },
-        }
-    }
+    child_loop.register(server_fd, .Read, accept_event.event_data);
+    child_loop.run();
+    //         },
+    //         else => {
+    //             std.log.info("child process started with PID: {d}", .{pid});
+    //         },
+    //     }
+    // }
     switch (GlobalState.processType()) {
         .Parent => {
             _ = c.waitpid(-1, null, 0);

@@ -1,6 +1,6 @@
-server_fd: i32,
-client_fd: i32,
-proxy_fd: ?i32 = null,
+server_fd: usize,
+client_fd: usize,
+proxy_fd: ?usize = null,
 state: State = .WaitingClientRead,
 event_data: *EventData,
 http_request: ?HttpRequest = null,
@@ -11,7 +11,7 @@ allocator: Allocator,
 const EventData = EventLoop.EventData;
 const Self = @This();
 
-pub fn init(allocator: Allocator, server_fd: i32, client_fd: i32) *Self {
+pub fn init(allocator: Allocator, server_fd: usize, client_fd: usize) *Self {
     const self = allocator.create(Self) catch unreachable;
     const event_data = allocator.create(EventData) catch unreachable;
 
@@ -28,9 +28,9 @@ pub fn init(allocator: Allocator, server_fd: i32, client_fd: i32) *Self {
 
 pub fn deinit(self: *@This()) void {
     if (self.proxy_fd) |fd| {
-        _ = c.close(fd);
+        _ = c.close(@intCast(fd));
     }
-    _ = c.close(self.client_fd);
+    _ = c.close(@intCast(self.client_fd));
     if (self.http_request) |*req| {
         req.*.deinit();
     }
@@ -43,28 +43,31 @@ pub fn deinit(self: *@This()) void {
 
 fn typeErasedCallback(context: *anyopaque, event_loop: *EventLoop) void {
     const self: *@This() = @ptrCast(@alignCast(context));
-    self.work(event_loop);
+    self.work(event_loop) catch |err| {
+        std.log.err("Error in ProxyWorkEvent::work: {any}", .{err});
+    };
 }
 
-pub fn work(self: *Self, event_loop: *EventLoop) void {
+pub fn work(self: *Self, event_loop: *EventLoop) anyerror!void {
     std.log.debug("ProxyWorkEvent:: callback, {any}", .{self.state});
+    errdefer self.deinit();
 
     switch (self.state) {
         .WaitingClientRead => {
-            self.http_request = HttpRequest.readFromSocket(self.allocator, self.client_fd);
-            self.proxy_fd = connectToBackendProxy(.{ 127, 0, 0, 1 }, 9999);
-            event_loop.registerWithOption(self.proxy_fd.?, .Write, self.event_data, .{ .oneshot = true });
+            self.http_request = try HttpRequest.readFromSocket(self.allocator, self.client_fd);
+            self.proxy_fd = try connectToBackendProxy(.{ 127, 0, 0, 1 }, 9999);
+            try event_loop.registerWithOption(self.proxy_fd.?, .Write, self.event_data, .{ .oneshot = true });
             self.state = self.state.transition();
         },
         .WaitingProxyWrite => {
-            utils.sendToSocket(self.proxy_fd.?, self.http_request.?.toBytes());
-            event_loop.registerWithOption(self.proxy_fd.?, .Read, self.event_data, .{ .oneshot = true });
+            _ = try socket.sendToSocket(self.proxy_fd.?, self.http_request.?.toBytes());
+            try event_loop.registerWithOption(self.proxy_fd.?, .Read, self.event_data, .{ .oneshot = true });
             self.state = self.state.transition();
         },
         .WaitingProxyRead => {
-            self.http_response = HttpResponse.readFromSocket(self.allocator, self.proxy_fd.?);
+            self.http_response = try HttpResponse.readFromSocket(self.allocator, self.proxy_fd.?);
+            _ = try socket.sendToSocket(self.client_fd, self.http_response.?.toBytes());
             self.state = self.state.transition();
-            utils.sendToSocket(self.client_fd, self.http_response.?.toBytes());
         },
         else => |x| {
             std.log.debug("Received {any}", .{x});
@@ -72,29 +75,26 @@ pub fn work(self: *Self, event_loop: *EventLoop) void {
         },
     }
     if (self.state == .Complete or self.state == .Error) {
+        std.log.debug("Work completed: -- {any}", .{self.state});
         self.deinit();
     }
 }
 
-fn connectToBackendProxy(addr: [4]u8, port: u16) i32 {
+fn connectToBackendProxy(addr: [4]u8, port: u16) !usize {
     const proxy_fd = c.socket(posix.AF.INET, posix.SOCK.STREAM, 0);
     var result = posix.errno(proxy_fd);
-    if (result != .SUCCESS) {
-        std.log.err("proxy socket call failed, {any}", .{result});
-        GlobalState.requestShutdown();
-    }
+    if (result != .SUCCESS) return error.SocketInitFailed;
+
     const proxy_sock_addr_in: posix.sockaddr.in = .{
         .family = posix.AF.INET,
         .addr = @as(*align(1) const u32, @ptrCast(&addr)).*,
         .port = std.mem.nativeToBig(u16, port),
     };
     result = posix.errno(c.connect(proxy_fd, @ptrCast(&proxy_sock_addr_in), @sizeOf(@TypeOf(proxy_sock_addr_in))));
-    if (result != .SUCCESS) {
-        // @todo - INPROGRESS needs to be handled
-        std.log.err("proxy connect call failed, {any}", .{result});
-        GlobalState.requestShutdown();
-    }
-    return proxy_fd;
+    // @todo - INPROGRESS needs to be handled
+    if (result != .SUCCESS) return error.ProxyConnectFailed;
+
+    return @intCast(proxy_fd);
 }
 
 const State = enum {
@@ -120,6 +120,7 @@ const GlobalState = @import("../GlobalState.zig");
 const utils = @import("../utils.zig");
 const ArrayList = @import("../ArrayList.zig");
 const Http = @import("../Http.zig");
+const socket = @import("../socket.zig");
 const HttpRequest = Http.HttpRequest;
 const HttpResponse = Http.HttpResponse;
 const c = std.c;

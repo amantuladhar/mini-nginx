@@ -1,6 +1,7 @@
 pub fn main() !void {
     const allocator, const deinit = getAllocator();
     defer _ = if (deinit) debug_allocator.deinit();
+
     std.log.info("Parent is alive!! {d}", .{c.getpid()});
 
     setupGracefulShutdown();
@@ -9,11 +10,11 @@ pub fn main() !void {
 
     const server: [4]u8 = .{0} ** 4;
     const server_port: u16 = cli_args.port;
-    const server_fd = setupMasterSocketListener(server, server_port);
-    defer _ = c.close(server_fd);
+    const server_fd = try setupMasterSocketListener(server, server_port);
+    defer _ = c.close(@intCast(server_fd));
 
     if (cli_args.num_of_workers == 0) {
-        workerLoop(allocator, server_fd);
+        try workerLoop(allocator, server_fd);
         return;
     }
 
@@ -25,11 +26,15 @@ pub fn main() !void {
             -1 => std.log.err("Fork failed: {any}", .{posix.errno(pid)}),
             0 => {
                 std.log.info("I(child) am alive!!! - {d}", .{c.getpid()});
-                workerLoop(allocator, server_fd);
+                try workerLoop(allocator, server_fd);
+                break; // child process doesn't need to run another child process
             },
-            else => std.log.info("child process started with PID: {d}", .{pid}),
+            else => |cpid| {
+                std.log.info("child process started with PID: {d}", .{cpid});
+            },
         }
     }
+
     switch (GlobalState.processType()) {
         .Parent => {
             _ = c.waitpid(-1, null, 0);
@@ -40,66 +45,54 @@ pub fn main() !void {
         },
     }
 }
-fn workerLoop(allocator: Allocator, server_fd: i32) void {
+fn workerLoop(allocator: Allocator, server_fd: usize) !void {
     GlobalState.setProcessType(.Child);
 
-    var loop = EventLoop.init();
+    var loop = try EventLoop.init();
     defer loop.deinit();
 
     const accept_event = AcceptConnectionEvent.init(allocator, server_fd);
     defer accept_event.deinit();
 
-    loop.register(server_fd, .Read, accept_event.event_data);
+    try loop.registerWithOption(server_fd, .Read, accept_event.event_data, .{ .oneshot = true });
     loop.run();
+    std.log.debug("{d} Worker loop finished", .{c.getpid()});
 }
 
-fn setupMasterSocketListener(server: [4]u8, port: u16) i32 {
+fn setupMasterSocketListener(server: [4]u8, port: u16) !usize {
     const server_fd = c.socket(posix.AF.INET, posix.SOCK.STREAM, 0);
     var result = posix.errno(server_fd);
-    if (result != .SUCCESS) {
-        std.log.err("Call to socket failed: {any}", .{result});
-        GlobalState.requestShutdown();
-    }
+    if (result != .SUCCESS) return error.SocketInitFailed;
+
+    try setNonblocking(@intCast(server_fd));
 
     result = posix.errno(c.setsockopt(server_fd, posix.SOL.SOCKET, posix.SO.REUSEADDR, &@as(u32, 1), @sizeOf(u32)));
-    if (result != .SUCCESS) {
-        std.log.err("call to setsockopt failed: {any}", .{result});
-        GlobalState.requestShutdown();
-    }
+    if (result != .SUCCESS) return error.SetSocketOptionFailed;
     const sock_addr_in: posix.sockaddr.in = .{
         .family = posix.AF.INET,
         // inet_addr or inet_pton can be used but zig version of struct doesn't have this field. Hmm...
         .addr = @as(*align(1) const u32, @ptrCast(&server)).*,
         .port = std.mem.nativeToBig(u16, port),
     };
+
     result = posix.errno(c.bind(server_fd, @ptrCast(&sock_addr_in), @sizeOf(@TypeOf(sock_addr_in))));
-    if (result != .SUCCESS) {
-        std.log.err("call to bind failed: {any}", .{result});
-        GlobalState.requestShutdown();
-    }
+    if (result != .SUCCESS) return error.BindFailed;
 
     result = posix.errno(c.listen(server_fd, 1));
-    if (result != .SUCCESS) {
-        std.log.err("call to listen failed: {any}", .{result});
-        GlobalState.requestShutdown();
-    }
-
-    const existing_flag = c.fcntl(server_fd, posix.F.GETFL, @as(u32, 0));
-    result = posix.errno(existing_flag);
-    if (result != .SUCCESS) {
-        std.log.err("call to fcntl failed: {any}", .{result});
-        GlobalState.requestShutdown();
-    }
-
-    result = posix.errno(c.fcntl(server_fd, posix.F.SETFL, @as(usize, @intCast(existing_flag)) | posix.SOCK.NONBLOCK));
-    if (result != .SUCCESS) {
-        std.log.err("call to fcntl failed: {any}", .{result});
-        GlobalState.requestShutdown();
-    }
-
+    if (result != .SUCCESS) return error.ListenFailed;
     std.log.info("Waiting for client connection:\nport: {d}", .{port});
+    return @intCast(server_fd);
+}
 
-    return server_fd;
+// This way to make socket non blocking is not working via zig
+pub fn setNonblocking(fd: usize) SocketError!void {
+    const existing_flag = c.fcntl(@intCast(fd), posix.F.GETFL, @as(u32, 0));
+    var result = posix.errno(existing_flag);
+    if (result != .SUCCESS) return error.GetFlagFailed;
+
+    const O_NONBLOCK_VALUE = 0x4;
+    result = posix.errno(c.fcntl(@intCast(fd), posix.F.SETFL, @as(usize, @intCast(existing_flag)) | O_NONBLOCK_VALUE));
+    if (result != .SUCCESS) return error.SetFlagFailed;
 }
 
 fn getAllocator() struct { Allocator, bool } {
@@ -124,13 +117,15 @@ fn setupGracefulShutdown() void {
     };
     var result = c.sigaction(c.SIG.TERM, &act, null);
     if (posix.errno(result) != .SUCCESS) {
-        std.log.err("sigaction call failed term: {any}", .{posix.errno(result)});
+        std.log.err("{d}: sigaction call failed term: {any}", .{ c.getpid(), posix.errno(result) });
         GlobalState.requestShutdown();
+        return;
     }
     result = c.sigaction(c.SIG.INT, &act, null);
     if (posix.errno(result) != .SUCCESS) {
-        std.log.err("sigaction call failed int: {any}", .{posix.errno(result)});
+        std.log.err("{d}: sigaction call failed int: {any}", .{ c.getpid(), posix.errno(result) });
         GlobalState.requestShutdown();
+        return;
     }
 }
 
@@ -142,6 +137,8 @@ const EventLoop = @import("EventLoop.zig");
 const AcceptConnectionEvent = @import("./events/AcceptConnectionEvent.zig");
 const c = std.c;
 const posix = std.posix;
+const socket = @import("socket.zig");
 const Allocator = std.mem.Allocator;
+const SocketError = socket.SocketError;
 const native_os = builtin.os.tag;
 var debug_allocator: std.heap.DebugAllocator(.{}) = .init;

@@ -6,6 +6,7 @@ pub fn build(b: *std.Build) void {
 
     const emod = b.createModule(.{ .root_source_file = b.path("src/main.zig"), .target = t, .optimize = o });
     const exe = b.addExecutable(.{ .name = "mini_nginx", .root_module = emod });
+    exe.linkLibC();
 
     b.installArtifact(exe);
     const run_cmd = b.addRunArtifact(exe);

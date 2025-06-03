@@ -20,6 +20,8 @@ pub const HttpStatusCode = enum(u16) {
     }
 };
 
+pub const HttpError = error{} || SocketError;
+
 pub const HttpResponse = struct {
     status_code: HttpStatusCode,
     headers: std.StringHashMap([]const u8),
@@ -49,13 +51,13 @@ pub const HttpResponse = struct {
         try writer.print(my_fmt, .{ self.status_code, self.headers.count(), self.body });
     }
 
-    pub fn readFromSocket(allocator: Allocator, fd: i32) @This() {
+    pub fn readFromSocket(allocator: Allocator, fd: usize) HttpError!@This() {
         var buffer = ArrayList.init(allocator);
         var reader = SocketReader{ .fd = fd, .buffer = &buffer };
 
-        const status_code = parseStatusCode(&reader);
-        const headers = parseHeaders(allocator, &reader);
-        const body: []u8 = if (headers.get("content-length")) |len| reader.readExact(std.fmt.parseInt(u16, len, 10) catch unreachable) else "";
+        const status_code = try parseStatusCode(&reader);
+        const headers = try parseHeaders(allocator, &reader);
+        const body: []u8 = if (headers.get("content-length")) |len| try reader.readExact(std.fmt.parseInt(u16, len, 10) catch unreachable) else "";
         return .{
             .status_code = status_code,
             .headers = headers,
@@ -65,8 +67,8 @@ pub const HttpResponse = struct {
         };
     }
 
-    fn parseStatusCode(reader: *SocketReader) HttpStatusCode {
-        const line = reader.readUntil('\n');
+    fn parseStatusCode(reader: *SocketReader) HttpError!HttpStatusCode {
+        const line = try reader.readUntil('\n');
         var parts = std.mem.splitAny(u8, line, " ");
         _ = parts.next().?;
         const status_code = parts.next().?;
@@ -119,15 +121,15 @@ pub const HttpRequest = struct {
         });
     }
 
-    pub fn readFromSocket(allocator: Allocator, fd: i32) HttpRequest {
+    pub fn readFromSocket(allocator: Allocator, fd: usize) HttpError!HttpRequest {
         var buffer = ArrayList.init(allocator);
         var reader = SocketReader{ .fd = fd, .buffer = &buffer };
 
-        const status_line = parseStatusLine(&reader);
-        const headers = parseHeaders(allocator, &reader);
+        const status_line = try parseStatusLine(&reader);
+        const headers = try parseHeaders(allocator, &reader);
         var body: ?[]u8 = null;
         if (headers.get("content-length")) |len| {
-            body = reader.readExact(std.fmt.parseInt(u16, len, 10) catch unreachable);
+            body = try reader.readExact(std.fmt.parseInt(u16, len, 10) catch unreachable);
         }
         return .{
             .method = status_line.method,
@@ -139,8 +141,8 @@ pub const HttpRequest = struct {
         };
     }
 
-    fn parseStatusLine(reader: *SocketReader) struct { method: []const u8, path: []const u8 } {
-        const line = reader.readUntil('\n');
+    fn parseStatusLine(reader: *SocketReader) HttpError!struct { method: []const u8, path: []const u8 } {
+        const line = try reader.readUntil('\n');
         var parts = std.mem.splitAny(u8, line, " ");
         const method = parts.next().?;
         const path = parts.next().?;
@@ -148,19 +150,18 @@ pub const HttpRequest = struct {
     }
 };
 
-fn parseHeaders(allocator: Allocator, reader: *SocketReader) std.StringHashMap([]const u8) {
+fn parseHeaders(allocator: Allocator, reader: *SocketReader) HttpError!std.StringHashMap([]const u8) {
     // @todo - implement your own hashmap
     var map = std.StringHashMap([]const u8).init(allocator);
-    var line = reader.readUntil('\n');
+    var line = try reader.readUntil('\n');
     while (!std.mem.eql(u8, "\r\n", line)) {
-        defer line = reader.readUntil('\n');
-
         const key, const value = splitTwo(line, ':');
         toLower(key);
         map.put(
             std.mem.trim(u8, key, &std.ascii.whitespace),
             std.mem.trim(u8, value, &std.ascii.whitespace),
         ) catch unreachable;
+        line = try reader.readUntil('\n');
     }
     return map;
 }
@@ -189,3 +190,5 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const ArrayList = @import("ArrayList.zig");
 const SocketReader = @import("SocketReader.zig");
+const socket = @import("socket.zig");
+const SocketError = socket.SocketError;

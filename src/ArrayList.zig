@@ -13,6 +13,13 @@ pub fn init(allocator: Allocator) Self {
         .allocator = allocator,
     };
 }
+
+pub fn deinit(self: *@This()) void {
+    if (self.items.len > 0) {
+        self.allocator.free(self.items);
+    }
+}
+
 pub fn append(self: *@This(), byte: u8) void {
     self.resizeIfNeeded();
     self.items[self.len] = byte;

@@ -12,31 +12,24 @@ pub fn main() !void {
     const server_fd = setupMasterSocketListener(server, server_port);
     defer _ = c.close(server_fd);
 
-    // for (0..5) |it| {
-    //     _ = it;
-    //     const pid = c.fork();
-    //     switch (pid) {
-    //         -1 => {
-    //             std.log.err("Fork failed: {any}", .{posix.errno(pid)});
-    //         },
-    //         0 => {
-    //             std.log.info("I(child) am alive!!! - {d}", .{c.getpid()});
-    //             GlobalState.setProcessType(.Child);
+    if (cli_args.num_of_workers == 0) {
+        workerLoop(allocator, server_fd);
+        return;
+    }
 
-    var child_loop = EventLoop.init();
-    defer child_loop.deinit();
-
-    const accept_event = AcceptConnectionEvent.init(allocator, server_fd);
-    defer accept_event.deinit();
-
-    child_loop.register(server_fd, .Read, accept_event.event_data);
-    child_loop.run();
-    //         },
-    //         else => {
-    //             std.log.info("child process started with PID: {d}", .{pid});
-    //         },
-    //     }
-    // }
+    for (0..cli_args.num_of_workers) |it| {
+        _ = it;
+        const pid = c.fork();
+        // @todo CPU Affinity
+        switch (pid) {
+            -1 => std.log.err("Fork failed: {any}", .{posix.errno(pid)}),
+            0 => {
+                std.log.info("I(child) am alive!!! - {d}", .{c.getpid()});
+                workerLoop(allocator, server_fd);
+            },
+            else => std.log.info("child process started with PID: {d}", .{pid}),
+        }
+    }
     switch (GlobalState.processType()) {
         .Parent => {
             _ = c.waitpid(-1, null, 0);
@@ -47,13 +40,18 @@ pub fn main() !void {
         },
     }
 }
+fn workerLoop(allocator: Allocator, server_fd: i32) void {
+    GlobalState.setProcessType(.Child);
 
-const HttpRequest = struct {
-    method: []const u8,
-    path: []const u8,
-    headers: std.StringHashMap([]const u8),
-    body: []const u8,
-};
+    var loop = EventLoop.init();
+    defer loop.deinit();
+
+    const accept_event = AcceptConnectionEvent.init(allocator, server_fd);
+    defer accept_event.deinit();
+
+    loop.register(server_fd, .Read, accept_event.event_data);
+    loop.run();
+}
 
 fn setupMasterSocketListener(server: [4]u8, port: u16) i32 {
     const server_fd = c.socket(posix.AF.INET, posix.SOCK.STREAM, 0);

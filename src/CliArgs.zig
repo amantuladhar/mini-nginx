@@ -1,6 +1,7 @@
 port: u16 = 8080,
 msg: []const u8 = "[server 1]",
 proxy_port: ?u16 = null,
+num_of_workers: u8 = 5,
 
 const Self = @This();
 
@@ -24,6 +25,11 @@ pub fn parse() !Self {
         if (std.mem.eql(u8, "--proxy-port", arg)) {
             const proxy_port = args.next() orelse unreachable;
             cli_args.proxy_port = try std.fmt.parseInt(u16, proxy_port, 10);
+            continue;
+        }
+        if (std.mem.eql(u8, "--num-of-workers", arg)) {
+            const worker_count = args.next() orelse unreachable;
+            cli_args.num_of_workers = try std.fmt.parseInt(u8, worker_count, 10);
             continue;
         }
     }

@@ -48,7 +48,7 @@ fn typeErasedCallback(context: *anyopaque, event_loop: *EventLoop) void {
     };
 }
 
-pub fn work(self: *Self, event_loop: *EventLoop) anyerror!void {
+pub fn work(self: *Self, event_loop: *EventLoop) !void {
     std.log.debug("ProxyWorkEvent:: callback, {any}", .{self.state});
     errdefer self.deinit();
 

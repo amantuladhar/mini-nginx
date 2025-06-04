@@ -24,7 +24,7 @@ const AcceptConnectionEventError = error{} || SocketError || EventLoop.EventLoop
 
 pub fn accept(self: *Self, event_loop: *EventLoop) AcceptConnectionEventError!void {
     std.log.debug("{d} AcceptConnectionEvent called", .{c.getpid()});
-    const client_fd = try acceptClientConnection(self.server_fd);
+    const client_fd = acceptClientConnection(self.server_fd) catch return;
     // @todo - allocator maybe should be args to function
     const proxy_work_event = ProxyWorkEvent.init(self.allocator, self.server_fd, client_fd);
     try event_loop.register(client_fd, .Read, proxy_work_event.event_data);
@@ -43,9 +43,14 @@ fn acceptClientConnection(server_fd: usize) SocketError!usize {
 
     const client_fd = c.accept(@intCast(server_fd), @ptrCast(&client_addr), &client_addr_len);
     const result = posix.errno(client_fd);
-    if (result != .SUCCESS) return error.AcceptFailed;
-    std.log.info("{d} Connection from client accepted: {any}", .{ c.getpid(), client_addr });
-    return @intCast(client_fd);
+
+    return switch (result) {
+        .SUCCESS => @intCast(client_fd),
+        else => return error.AcceptFailed,
+    };
+    // if (result != .SUCCESS) return error.AcceptFailed;
+    // std.log.info("{d} Connection from client accepted: {any}", .{ c.getpid(), client_addr });
+    // return @intCast(client_fd);
 }
 
 const std = @import("std");

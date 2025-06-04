@@ -54,7 +54,7 @@ fn workerLoop(allocator: Allocator, server_fd: usize) !void {
     const accept_event = AcceptConnectionEvent.init(allocator, server_fd);
     defer accept_event.deinit();
 
-    try loop.registerWithOption(server_fd, .Read, accept_event.event_data, .{ .oneshot = true });
+    try loop.register(server_fd, .Read, accept_event.event_data);
     loop.run();
     std.log.debug("{d} Worker loop finished", .{c.getpid()});
 }
@@ -90,7 +90,12 @@ pub fn setNonblocking(fd: usize) SocketError!void {
     var result = posix.errno(existing_flag);
     if (result != .SUCCESS) return error.GetFlagFailed;
 
-    const O_NONBLOCK_VALUE = 0x4;
+    const O_NONBLOCK_VALUE: u32 = switch (builtin.os.tag) {
+        // .macos => 0x4,
+        .macos => @bitCast(std.c.O{ .NONBLOCK = true }),
+        .linux => @bitCast(std.c.O{ .NONBLOCK = true }),
+        else => @compileError("Unsupported OS: " ++ @tagName(builtin.os.tag)),
+    };
     result = posix.errno(c.fcntl(@intCast(fd), posix.F.SETFL, @as(usize, @intCast(existing_flag)) | O_NONBLOCK_VALUE));
     if (result != .SUCCESS) return error.SetFlagFailed;
 }

@@ -108,8 +108,29 @@ fn poll(queuefd: i32, events: []Event) i32 {
     };
     return result;
 }
+
 pub fn register(self: *const Self, where: usize, what: Interest, event_data: *EventData) EventLoopError!void {
     try self.registerWithOption(where, what, event_data, .{});
+}
+pub fn unregister(self: *const Self, where: usize, what: Interest) EventLoopError!void {
+    switch (builtin.os.tag) {
+        .macos => {
+            const changelist: []const Event = &[_]Event{.{
+                .ident = @intCast(where),
+                .filter = @intFromEnum(what),
+                .flags = std.c.EV.DELETE | std.c.EV.DISABLE,
+                .fflags = 0,
+                .data = 0,
+                .udata = 0,
+            }};
+            var events: [0]Event = undefined;
+            _ = try posix.kevent(self.queue_fd, changelist, &events, null);
+        },
+        .linux => {
+            _ = std.os.linux.epoll_ctl(self.queue_fd, std.os.linux.EPOLL.CTL_DEL, @intCast(where), null);
+        },
+        else => @compileError("Unsupported OS: " ++ @tagName(builtin.os.tag)),
+    }
 }
 
 pub fn registerWithOption(self: *const Self, where: usize, what: Interest, event_data: *EventData, options: Options) EventLoopError!void {

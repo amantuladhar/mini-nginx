@@ -7,3 +7,9 @@ RUN apt install curl ripgrep xz-utils nodejs btop lsof npm -y && \
 
 RUN tar -xf zig-linux-x86_64-0.14.0.tar.xz && \
     ln -sfn /zig-linux-x86_64-0.14.0/zig /usr/bin/zig
+
+RUN apt install -y tini
+
+ENTRYPOINT ["/usr/bin/tini", "--"]
+
+CMD ["tail", "-f", "/dev/null"]

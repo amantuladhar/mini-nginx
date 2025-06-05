@@ -144,11 +144,17 @@ pub fn registerWithOption(self: *const Self, where: usize, what: Interest, event
         },
         .linux => {
             var event = Event{
-                .events = @intFromEnum(what),
+                .events = @intFromEnum(what) | if (options.oneshot) std.os.linux.EPOLL.ONESHOT else 0,
                 .data = .{ .ptr = data },
             };
-            const result = c.epoll_ctl(self.queue_fd, std.os.linux.EPOLL.CTL_ADD, @intCast(where), &event);
-            if (posix.errno(result) != .SUCCESS) {
+            var result = c.epoll_ctl(self.queue_fd, std.os.linux.EPOLL.CTL_ADD, @intCast(where), &event);
+            var errno = posix.errno(result);
+
+            if (errno != .SUCCESS and errno == .EXIST) {
+                result = c.epoll_ctl(self.queue_fd, std.os.linux.EPOLL.CTL_MOD, @intCast(where), &event);
+                errno = posix.errno(result);
+            }
+            if (errno != .SUCCESS) {
                 std.log.err("epoll_ctl call failed: {any}", .{posix.errno(result)});
                 return error.RegisterFailed;
             }
